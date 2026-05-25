@@ -1,78 +1,77 @@
 # LULD Halt Resumption Strategy
 
-Systematic trading strategy that buys LULD (Limit Up-Limit Down) halt resumptions on NASDAQ-listed stocks and exits at 3:50 PM ET.
+A systematic intraday trading strategy that buys NASDAQ LULD (Limit Up-Limit Down)
+halt resumptions and exits at 3:50 PM ET. Backtested April 2021 – May 2026.
 
-## Backtest Results (realistic_backtest.py)
+## Results
 
 | Metric | Value |
 |--------|-------|
-| Period | Apr 2021 – May 2026 |
 | Trades | 550 |
-| Win rate (net of commissions) | 69.6% |
-| Starting equity | $900 |
-| Final equity | $35,691,470 |
-| CAGR | +717% |
-| Max drawdown | -13.0% |
-| Total commissions | $69,608 |
+| Win rate (net of commissions) | **69.6%** |
+| Median trade return | **+30.3%** |
+| Max drawdown | **-13.0%** |
+| CAGR from $900 start | +717% |
+| Total commissions paid | $69,608 |
 
-> **Note:** CAGR is driven by compounding from $900 to the $100k/trade cap. At full scale ($1M account, $100k/trade), realistic annual income is $400k–$900k gross.
+![Equity Curve](research/results/realistic_backtest.png)
 
-## Strategy Logic
-
-1. **Signal:** NASDAQ RSS feed detects LULD halt with `LUDP` reason code
-2. **Filter:** Stock must be up ≥2% from session open (halt-up) and RVOL ≥1.0
-3. **Entry:** Market order at halt resumption
-4. **Sizing:** 10% of BOD equity, max $100k/trade, max $300k/stock/day
-5. **Exit:** Market order at 3:50 PM ET regardless of P&L
+---
 
 ## Repository Structure
 
-```
-├── live_trader/          # Production bot (runs on server)
-│   ├── main.py           # Entry point
-│   ├── config.py         # All tunable parameters — edit this
-│   ├── halt_monitor.py   # Polls NASDAQ RSS, detects resumptions
-│   ├── signal_filter.py  # Applies halt-up + RVOL filters
-│   ├── execution.py      # Places / waits for IBKR orders
-│   ├── position_manager.py # Sizing, state, trade CSV logging
-│   ├── eod_exit.py       # 3:50 PM exit logic
-│   └── requirements.txt  # pip dependencies
-│
-├── TESTING/              # Research & backtesting scripts
-│   ├── realistic_backtest.py      # Main backtest ($900 start, 10% sizing)
-│   ├── sizing_comparison.py       # 5% vs 10% vs 25% vs 50% sizing
-│   ├── pyramid_vs_single.py       # All halts vs first-halt-only comparison
-│   ├── exit_liquidity.py          # Measures 3:20-3:50 PM exit window volume
-│   ├── exit_volume_analysis.py    # Exit volume vs returns correlation
-│   └── prehalt_volume_analysis.py # Pre-halt volume vs returns (no edge found)
-│
-└── docs/
-    ├── server_setup.md   # How to set up the DigitalOcean server
-    └── deployment.md     # How to deploy updates to the server
-```
+### `bot/` — Live Trading Bot
+Automated bot that runs on a Linux server and trades the strategy in real time via IBKR.
+- Edit `bot/config.py` to change parameters
+- See `docs/server_setup.md` to deploy on a new server
+- See `docs/deployment.md` to push updates
 
-## Quick Start
+### `research/` — Backtesting & Analysis
+Complete research framework. All data is included — clone and run immediately.
 
-### Paper trading (first time)
 ```bash
-# On the server
-cd /root/Live_Trader_Halts
-source venv/bin/activate
-python main.py
+pip install pandas numpy matplotlib scipy pyarrow
+python research/backtest/realistic_backtest.py
 ```
 
-See [docs/server_setup.md](docs/server_setup.md) for full server setup including IB Gateway.
+Key scripts:
+| Script | What it does |
+|--------|-------------|
+| `research/backtest/realistic_backtest.py` | Main backtest — $900 start, 10% sizing, IBKR commissions |
+| `research/backtest/sizing_comparison.py` | Compare 5% / 10% / 25% / 50% position sizing |
+| `research/backtest/pyramid_vs_single.py` | Pyramiding vs one trade per ticker per day |
+| `research/analysis/exit_volume_analysis.py` | Does exit liquidity predict returns? |
+| `research/analysis/prehalt_volume_analysis.py` | Does pre-halt volume predict returns? |
 
-## Key Config Settings (live_trader/config.py)
+Data is in `research/data/` — see `research/data/README.md` for full data dictionary.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `PAPER` | `True` | Set `False` for live trading |
-| `IBKR_PORT` | `4002` | IB Gateway paper port |
-| `POSITION_FRACTION` | `0.10` | 10% of BOD equity per trade |
-| `MAX_POS_USD` | `100_000` | Hard cap per trade |
-| `MAX_POS_PER_STOCK` | `300_000` | Max exposure per stock per day |
-| `MIN_RVOL` | `1.0` | Minimum relative volume |
-| `UP_MIN_MOVE` | `0.02` | Min 2% up move from session open |
-| `EXIT_HOUR_ET` | `15` | Exit time: 3:50 PM ET |
-| `EXIT_MINUTE_ET` | `50` | |
+---
+
+## Strategy Logic
+
+1. **Signal** — NASDAQ RSS feed detects `LUDP` halt code (Limit Up pause)
+2. **Filter** — Stock is ≥2% above session open (halt-up) AND RVOL ≥ 1.0
+3. **Entry** — Market order at halt resumption
+4. **Sizing** — 10% of beginning-of-day equity, hard cap $100k/trade
+5. **Exit** — Market order at 3:50 PM ET, no exceptions
+
+---
+
+## Docs
+
+- [Server Setup](docs/server_setup.md) — How to install and configure the bot on DigitalOcean
+- [Deployment](docs/deployment.md) — How to push code updates to the server
+- [Data Dictionary](research/data/README.md) — Column definitions for all datasets
+
+---
+
+## Quick Start (Research Only)
+
+```bash
+git clone https://github.com/gilbertknight-star/Trade-Halts
+cd Trade-Halts
+pip install pandas numpy matplotlib scipy pyarrow
+python research/backtest/realistic_backtest.py
+```
+
+Outputs: chart saved to `research/results/realistic_backtest.png`, trades to `research/data/realistic_backtest_trades.csv`.
