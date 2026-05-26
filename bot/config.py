@@ -14,6 +14,7 @@ PAPER = False   # True = paper account (port 4002), False = live account (port 4
 IBKR_HOST      = "127.0.0.1"
 IBKR_PORT      = 4002 if PAPER else 4001   # IB Gateway ports
 IBKR_CLIENT_ID = 1
+IBKR_ACCOUNT   = "U25292584"   # live account — empty string = auto (picks first)
 
 # ── Position sizing (mirrors realistic_backtest.py) ───────────────────────────
 POSITION_FRACTION = 0.10          # 10% of BOD equity per trade

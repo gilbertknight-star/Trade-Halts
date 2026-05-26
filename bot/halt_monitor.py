@@ -164,15 +164,19 @@ class HaltMonitor:
 def _parse_rss(content: bytes) -> ET.Element:
     """
     Parse RSS bytes robustly.
-    NASDAQ sometimes sends UTF-8 with BOM, or HTML error pages on holidays/downtime.
-    Tries utf-8-sig (strips BOM), then utf-8, then latin-1 before giving up.
+    NASDAQ sends UTF-8 with BOM (\xef\xbb\xbf). Passing a decoded string
+    with an encoding="utf-8" XML declaration confuses Python's parser, so
+    strip the BOM from bytes and pass bytes directly to ET.fromstring.
     """
-    for enc in ("utf-8-sig", "utf-8", "latin-1"):
-        try:
-            return ET.fromstring(content.decode(enc))
-        except ET.ParseError:
-            continue
-    raise ValueError("RSS feed did not return valid XML — market may be closed or feed is down")
+    UTF8_BOM = b"\xef\xbb\xbf"
+    if content.startswith(UTF8_BOM):
+        content = content[len(UTF8_BOM):]
+    try:
+        return ET.fromstring(content)
+    except ET.ParseError as e:
+        raise ValueError(
+            f"RSS feed did not return valid XML — market may be closed or feed is down ({e})"
+        ) from e
 
 
 def _text(elem: ET.Element, tag: str) -> str | None:

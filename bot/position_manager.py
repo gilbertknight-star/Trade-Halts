@@ -16,6 +16,7 @@ from config import (
     MIN_POS_USD,
     MAX_POS_PER_STOCK,
     MAX_SHARES_OVERRIDE,
+    IBKR_ACCOUNT,
     STATE_FILE,
     TRADES_CSV,
 )
@@ -66,9 +67,16 @@ class PositionManager:
 
     def _fetch_net_liquidation(self) -> float:
         for av in self.ib.accountValues():
-            if av.tag == "NetLiquidation" and av.currency == "USD":
-                return float(av.value)
-        raise RuntimeError("Could not fetch NetLiquidation from IBKR")
+            if av.tag != "NetLiquidation" or av.currency != "USD":
+                continue
+            # If a specific account is configured, only use that one
+            if IBKR_ACCOUNT and av.account != IBKR_ACCOUNT:
+                continue
+            return float(av.value)
+        raise RuntimeError(
+            f"Could not fetch NetLiquidation from IBKR "
+            f"(account={IBKR_ACCOUNT or 'any'})"
+        )
 
     # ── Position sizing ───────────────────────────────────────────────────────
 
