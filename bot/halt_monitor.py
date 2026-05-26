@@ -69,6 +69,10 @@ class HaltMonitor:
 
     def run(self) -> None:
         """Blocking poll loop — run in a background thread."""
+        # Pre-populate _fired with all halts already resumed before we started.
+        # The NASDAQ RSS feed shows the full day's halts, so without this the
+        # first poll would queue every halt that fired since 9:30 AM.
+        self._initial_scan()
         log.info("Halt monitor started, polling every %ds", HALT_POLL_SECONDS)
         while True:
             try:
@@ -76,6 +80,33 @@ class HaltMonitor:
             except Exception as e:
                 log.warning("Halt poll error: %s", e)
             time.sleep(HALT_POLL_SECONDS)
+
+    def _initial_scan(self) -> None:
+        """Mark all currently-resumed halts as already seen (don't trade them)."""
+        try:
+            resp = self._session.get(HALT_RSS_URL, timeout=10)
+            resp.raise_for_status()
+            root = ET.fromstring(resp.text)
+            pre_fired = []
+            for item in root.findall(".//item"):
+                symbol    = _text(item, "symbol") or _text(item, "title")
+                halt_code = _text(item, "reasonCode") or ""
+                resume_time = _text(item, "resumptionTime") or ""
+                if not symbol:
+                    continue
+                symbol = symbol.upper().strip()
+                if halt_code not in LULD_HALT_CODES:
+                    continue
+                if resume_time and resume_time.strip():
+                    self._fired.add(symbol)
+                    pre_fired.append(symbol)
+            if pre_fired:
+                log.info("Initial scan: skipping %d already-resumed halts: %s",
+                         len(pre_fired), pre_fired)
+            else:
+                log.info("Initial scan: no prior resumptions found")
+        except Exception as e:
+            log.warning("Initial scan failed: %s — will proceed anyway", e)
 
     def reset_daily(self) -> None:
         """Call at market open each day to clear state."""
