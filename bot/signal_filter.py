@@ -14,7 +14,7 @@ import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from ib_insync import IB, Stock, Ticker
+from ib_insync import IB, Stock
 
 from config import MIN_PRICE, MAX_PRICE, UP_MIN_MOVE, MIN_RVOL
 
@@ -34,12 +34,13 @@ def passes_filters(ib: IB, symbol: str, halt_dt_et=None) -> tuple[bool, str, dic
     Returns (passes, reason, metrics).
     metrics keys: price, prev_close, day_open, up_move, rvol
 
-    Data calls (in order):
-      1. reqMktData snapshot        — resumption price (for sizing + price range)
-      2. reqHistoricalData 1D bars  — day_open, pre_halt_close, RVOL (single call)
+    Single data call: reqHistoricalData 1D 1-min bars only.
+    No reqMktData snapshot needed — works on paper accounts with delayed quotes.
 
-    Gap-up uses pre_halt_close (last bar before halt started) — matches backtest.
-    Sizing uses resumption price from snapshot.
+    pre_halt_close (last completed bar before halt) is used for:
+      - price range filter
+      - gap-up filter   (matches backtest exactly)
+      - position sizing (passed back in metrics as 'price')
     """
     contract = Stock(symbol, "SMART", "USD")
 
@@ -50,30 +51,24 @@ def passes_filters(ib: IB, symbol: str, halt_dt_et=None) -> tuple[bool, str, dic
             log.warning("Could not qualify contract %s: %s", symbol, e)
             return False, f"qualify failed: {e}", {}
 
-        ticker: Ticker = ib.reqMktData(contract, "", True, False)
-        ib.sleep(1.5)
-        price      = ticker.last or ticker.close or ticker.bid or None
-        prev_close = ticker.close or None
-        ib.cancelMktData(contract)
+    # ── Single historical data call — all filters computed from these bars ─────
+    day_open, rvol, pre_halt_close = _get_open_and_rvol(ib, contract)
 
-    if price is None or price <= 0:
-        return False, "no valid price", {}
+    if pre_halt_close is None or pre_halt_close <= 0:
+        return False, "no valid pre-halt price from bars", {}
 
-    # ── Filter 1: Price range (uses resumption price) ─────────────────────────
+    price = pre_halt_close   # used for sizing and price range
+
+    # ── Filter 1: Price range ─────────────────────────────────────────────────
     if price < MIN_PRICE:
         return False, f"price {price:.4f} below MIN_PRICE {MIN_PRICE}", {}
     if price > MAX_PRICE:
         return False, f"price {price:.4f} above MAX_PRICE {MAX_PRICE}", {}
 
-    # ── Fetch 1-min bars once ─────────────────────────────────────────────────
-    day_open, rvol, pre_halt_close = _get_open_and_rvol(ib, contract)
-
-    # ── Filter 2: Halt-up (uses pre_halt_close — matches backtest exactly) ────
-    # Backtest: move = (last bar before halt started - day_open) / day_open
-    up_move       = None
-    filter_price  = pre_halt_close if pre_halt_close else price
+    # ── Filter 2: Halt-up (pre_halt_close vs day_open — matches backtest) ─────
+    up_move = None
     if day_open and day_open > 0:
-        up_move = (filter_price - day_open) / day_open
+        up_move = (price - day_open) / day_open
         if up_move < UP_MIN_MOVE:
             return False, f"up_move {up_move:.4f} < UP_MIN_MOVE {UP_MIN_MOVE}", {}
 
@@ -84,18 +79,15 @@ def passes_filters(ib: IB, symbol: str, halt_dt_et=None) -> tuple[bool, str, dic
         return False, f"rvol {rvol:.2f} < MIN_RVOL {MIN_RVOL}", {}
 
     metrics = {
-        "price":           round(price, 4),
-        "prev_close":      round(prev_close, 4)      if prev_close      else None,
-        "day_open":        round(day_open, 4)         if day_open        else None,
-        "pre_halt_close":  round(pre_halt_close, 4)  if pre_halt_close  else None,
-        "up_move":         round(up_move, 6)          if up_move is not None else None,
-        "rvol":            round(rvol, 4)             if rvol is not None    else None,
+        "price":          round(price, 4),
+        "day_open":       round(day_open, 4)   if day_open  else None,
+        "up_move":        round(up_move, 6)    if up_move is not None else None,
+        "rvol":           round(rvol, 4)       if rvol    is not None else None,
     }
-    log.info("PASS %s — pre_halt=%.4f up_move=%s rvol=%s resumption=%.4f",
-             symbol, filter_price,
+    log.info("PASS %s — pre_halt=%.4f up_move=%s rvol=%s",
+             symbol, price,
              f"{up_move:.2%}" if up_move is not None else "n/a",
-             f"{rvol:.2f}"    if rvol    is not None else "n/a",
-             price)
+             f"{rvol:.2f}"    if rvol    is not None else "n/a")
     return True, "ok", metrics
 
 
