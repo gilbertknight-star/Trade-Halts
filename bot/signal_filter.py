@@ -11,10 +11,16 @@ Returns (passes: bool, reason: str, metrics: dict)
 
 import logging
 import threading
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from ib_insync import IB, Stock, Ticker
 
 from config import MIN_PRICE, MAX_PRICE, UP_MIN_MOVE, MIN_RVOL
+
+ET = ZoneInfo("America/New_York")
+LULD_PAUSE_MINUTES = 5    # LULD pauses are always exactly 5 minutes
+RVOL_SURGE_MINUTES = 5    # measure surge in this window before halt started
 
 log = logging.getLogger(__name__)
 
@@ -101,44 +107,78 @@ def _get_day_open(ib: IB, contract) -> float | None:
 
 def _get_rvol(ib: IB, contract) -> float | None:
     """
-    Compute RVOL: average volume of today's bars so far vs
-    average volume of same bars over last 10 trading days.
+    Compute RVOL exactly as the backtest does:
+
+      surge_rate    = shares/min in the 5 minutes BEFORE the halt started
+      baseline_rate = shares/min from market open to start of that surge window
+
+      RVOL = surge_rate / baseline_rate
+
+    This measures the volume spike that caused the halt vs the stock's own
+    normal pace earlier today — the same signal the backtest was trained on.
+
+    LULD pauses are always 5 minutes, so:
+      halt_started  ≈ now - 5 min   (we are called just after resumption)
+      surge_window  = [halt_started - 5 min, halt_started)
+      baseline      = [market open, surge_window start)
     """
     try:
+        now_et = datetime.now(ET)
+        market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+
+        halt_started  = now_et - timedelta(minutes=LULD_PAUSE_MINUTES)
+        surge_start   = halt_started - timedelta(minutes=RVOL_SURGE_MINUTES)
+
+        # Need at least a few minutes of baseline — skip if halted near open
+        baseline_minutes = (surge_start - market_open).total_seconds() / 60
+        if baseline_minutes < 2:
+            log.debug("RVOL: not enough baseline time for %s (%.1f min)",
+                      contract.symbol, baseline_minutes)
+            return None
+
         with _IB_LOCK:
-            # Today's 1-min bars
-            today_bars = ib.reqHistoricalData(
+            bars = ib.reqHistoricalData(
                 contract,
                 endDateTime="",
                 durationStr="1 D",
                 barSizeSetting="1 min",
                 whatToShow="TRADES",
                 useRTH=True,
-                formatDate=1,
+                formatDate=2,   # returns datetime objects
             )
-        if not today_bars:
+        if not bars:
             return None
 
-        today_avg = sum(b.volume for b in today_bars) / len(today_bars)
+        # Split bars into surge window and baseline window
+        surge_vol    = 0.0
+        baseline_vol = 0.0
 
-        with _IB_LOCK:
-            hist_bars = ib.reqHistoricalData(
-                contract,
-                endDateTime="",
-                durationStr="10 D",
-                barSizeSetting="1 min",
-                whatToShow="TRADES",
-                useRTH=True,
-                formatDate=1,
-            )
-        if not hist_bars:
+        for bar in bars:
+            bar_dt = bar.date
+            # Normalise to ET (IBKR returns tz-aware datetimes with formatDate=2)
+            if hasattr(bar_dt, 'tzinfo') and bar_dt.tzinfo is not None:
+                bar_dt = bar_dt.astimezone(ET)
+            else:
+                bar_dt = bar_dt.replace(tzinfo=ET)
+
+            if surge_start <= bar_dt < halt_started:
+                surge_vol += bar.volume
+            elif market_open <= bar_dt < surge_start:
+                baseline_vol += bar.volume
+
+        if baseline_minutes <= 0 or baseline_vol <= 0:
             return None
 
-        hist_avg = sum(b.volume for b in hist_bars) / len(hist_bars)
-        if hist_avg <= 0:
+        baseline_rate = baseline_vol / baseline_minutes    # shares/min
+        surge_rate    = surge_vol    / RVOL_SURGE_MINUTES  # shares/min
+
+        if baseline_rate <= 0:
             return None
 
-        return today_avg / hist_avg
+        rvol = surge_rate / baseline_rate
+        log.debug("RVOL %s: surge=%.0f/min  baseline=%.0f/min  rvol=%.2f",
+                  contract.symbol, surge_rate, baseline_rate, rvol)
+        return rvol
 
     except Exception as e:
         log.debug("Could not compute RVOL for %s: %s", contract.symbol, e)
