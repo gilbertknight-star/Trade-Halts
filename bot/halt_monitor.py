@@ -86,7 +86,7 @@ class HaltMonitor:
         try:
             resp = self._session.get(HALT_RSS_URL, timeout=10)
             resp.raise_for_status()
-            root = ET.fromstring(resp.text)
+            root = _parse_rss(resp.content)
             pre_fired = []
             for item in root.findall(".//item"):
                 symbol    = _text(item, "symbol") or _text(item, "title")
@@ -120,7 +120,7 @@ class HaltMonitor:
         """
         resp = self._session.get(HALT_RSS_URL, timeout=10)
         resp.raise_for_status()
-        root = ET.fromstring(resp.text)
+        root = _parse_rss(resp.content)
 
         for item in root.findall(".//item"):
             symbol      = _text(item, "symbol") or _text(item, "title")
@@ -159,6 +159,20 @@ class HaltMonitor:
                 log.error("on_resumption error for %s: %s", symbol, e, exc_info=True)
             finally:
                 self._queue.task_done()
+
+
+def _parse_rss(content: bytes) -> ET.Element:
+    """
+    Parse RSS bytes robustly.
+    NASDAQ sometimes sends UTF-8 with BOM, or HTML error pages on holidays/downtime.
+    Tries utf-8-sig (strips BOM), then utf-8, then latin-1 before giving up.
+    """
+    for enc in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            return ET.fromstring(content.decode(enc))
+        except ET.ParseError:
+            continue
+    raise ValueError("RSS feed did not return valid XML — market may be closed or feed is down")
 
 
 def _text(elem: ET.Element, tag: str) -> str | None:
