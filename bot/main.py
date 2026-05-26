@@ -103,8 +103,8 @@ def run_trading_day(ib: IB) -> None:
             log.info("SKIP %s — position size too small", symbol)
             return
 
-        # Place market order at resumption
-        trade = place_entry(ib, symbol, shares, limit_price=price)
+        # Market order at resumption — matches backtest fill assumption
+        trade = place_entry(ib, symbol, shares, limit_price=None)
         if trade is None:
             return
 

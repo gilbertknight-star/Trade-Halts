@@ -35,9 +35,11 @@ def passes_filters(ib: IB, symbol: str, halt_dt_et=None) -> tuple[bool, str, dic
     metrics keys: price, prev_close, day_open, up_move, rvol
 
     Data calls (in order):
-      1. reqMktData snapshot  — current price
-      2. reqHistoricalData 1D 1-min bars  — used for BOTH day_open and RVOL
-         (single request, split into windows inside _get_open_and_rvol)
+      1. reqMktData snapshot        — resumption price (for sizing + price range)
+      2. reqHistoricalData 1D bars  — day_open, pre_halt_close, RVOL (single call)
+
+    Gap-up uses pre_halt_close (last bar before halt started) — matches backtest.
+    Sizing uses resumption price from snapshot.
     """
     contract = Stock(symbol, "SMART", "USD")
 
@@ -57,52 +59,53 @@ def passes_filters(ib: IB, symbol: str, halt_dt_et=None) -> tuple[bool, str, dic
     if price is None or price <= 0:
         return False, "no valid price", {}
 
-    # ── Filter 1: Price range ─────────────────────────────────────────────────
+    # ── Filter 1: Price range (uses resumption price) ─────────────────────────
     if price < MIN_PRICE:
         return False, f"price {price:.4f} below MIN_PRICE {MIN_PRICE}", {}
     if price > MAX_PRICE:
         return False, f"price {price:.4f} above MAX_PRICE {MAX_PRICE}", {}
 
-    # ── Fetch 1-min bars once — reused for both day_open and RVOL ────────────
-    day_open, rvol = _get_open_and_rvol(ib, contract)
+    # ── Fetch 1-min bars once ─────────────────────────────────────────────────
+    day_open, rvol, pre_halt_close = _get_open_and_rvol(ib, contract)
 
-    # ── Filter 2: Halt-up ─────────────────────────────────────────────────────
-    up_move = None
+    # ── Filter 2: Halt-up (uses pre_halt_close — matches backtest exactly) ────
+    # Backtest: move = (last bar before halt started - day_open) / day_open
+    up_move       = None
+    filter_price  = pre_halt_close if pre_halt_close else price
     if day_open and day_open > 0:
-        up_move = (price - day_open) / day_open
+        up_move = (filter_price - day_open) / day_open
         if up_move < UP_MIN_MOVE:
             return False, f"up_move {up_move:.4f} < UP_MIN_MOVE {UP_MIN_MOVE}", {}
 
     # ── Filter 3: RVOL ────────────────────────────────────────────────────────
-    # None means baseline window was empty (halt too early in session to measure).
-    # Matches backtest: skip any event where baseline_bars was empty.
     if rvol is None:
         return False, "rvol unavailable (insufficient baseline — halt too early in session)", {}
     if rvol < MIN_RVOL:
         return False, f"rvol {rvol:.2f} < MIN_RVOL {MIN_RVOL}", {}
 
     metrics = {
-        "price":      round(price, 4),
-        "prev_close": round(prev_close, 4) if prev_close else None,
-        "day_open":   round(day_open, 4)   if day_open  else None,
-        "up_move":    round(up_move, 6)    if up_move is not None else None,
-        "rvol":       round(rvol, 4)       if rvol is not None else None,
+        "price":           round(price, 4),
+        "prev_close":      round(prev_close, 4)      if prev_close      else None,
+        "day_open":        round(day_open, 4)         if day_open        else None,
+        "pre_halt_close":  round(pre_halt_close, 4)  if pre_halt_close  else None,
+        "up_move":         round(up_move, 6)          if up_move is not None else None,
+        "rvol":            round(rvol, 4)             if rvol is not None    else None,
     }
-    log.info("PASS %s — price=%.4f up_move=%s rvol=%s",
-             symbol, price,
+    log.info("PASS %s — pre_halt=%.4f up_move=%s rvol=%s resumption=%.4f",
+             symbol, filter_price,
              f"{up_move:.2%}" if up_move is not None else "n/a",
-             f"{rvol:.2f}"    if rvol    is not None else "n/a")
+             f"{rvol:.2f}"    if rvol    is not None else "n/a",
+             price)
     return True, "ok", metrics
 
 
-def _get_open_and_rvol(ib: IB, contract) -> tuple[float | None, float | None]:
+def _get_open_and_rvol(ib: IB, contract) -> tuple[float | None, float | None, float | None]:
     """
-    Single reqHistoricalData call that returns both:
-      - day_open: open price of the first 1-min bar today
-      - rvol:     surge/baseline volume ratio (matches backtest formula)
-
-    One call instead of two cuts latency in half at the most time-sensitive
-    moment — right after halt resumption.
+    Single reqHistoricalData call that returns:
+      - day_open:       open price of the first 1-min bar today
+      - rvol:           surge/baseline volume ratio (matches backtest formula)
+      - pre_halt_close: last bar's close BEFORE the halt started
+                        (used for gap-up filter — matches backtest exactly)
     """
     try:
         with _IB_LOCK:
@@ -116,14 +119,14 @@ def _get_open_and_rvol(ib: IB, contract) -> tuple[float | None, float | None]:
                 formatDate=2,   # returns datetime objects
             )
         if not bars:
-            return None, None
+            return None, None, None
 
         # day open = first bar's open price
         day_open = float(bars[0].open) if bars else None
 
-        # ── RVOL windows ──────────────────────────────────────────────────────
-        now_et      = datetime.now(ET)
-        market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        # ── Timing windows ────────────────────────────────────────────────────
+        now_et       = datetime.now(ET)
+        market_open  = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
         halt_started = now_et - timedelta(minutes=LULD_PAUSE_MINUTES)
         surge_start  = halt_started - timedelta(minutes=RVOL_SURGE_MINUTES)
 
@@ -131,10 +134,11 @@ def _get_open_and_rvol(ib: IB, contract) -> tuple[float | None, float | None]:
         if baseline_minutes <= 0:
             log.debug("RVOL: surge window starts before open for %s — skipping",
                       contract.symbol)
-            return day_open, None
+            return day_open, None, None
 
-        surge_vol    = 0.0
-        baseline_vol = 0.0
+        surge_vol      = 0.0
+        baseline_vol   = 0.0
+        pre_halt_close = None   # last bar before halt started
 
         for bar in bars:
             bar_dt = bar.date
@@ -143,24 +147,29 @@ def _get_open_and_rvol(ib: IB, contract) -> tuple[float | None, float | None]:
             else:
                 bar_dt = bar_dt.replace(tzinfo=ET)
 
+            # Pre-halt close: last bar that completed before the halt started
+            if bar_dt < halt_started:
+                pre_halt_close = float(bar.close)
+
             if surge_start <= bar_dt < halt_started:
                 surge_vol += bar.volume
             elif market_open <= bar_dt < surge_start:
                 baseline_vol += bar.volume
 
         if baseline_vol <= 0:
-            return day_open, None
+            return day_open, None, pre_halt_close
 
         baseline_rate = baseline_vol / baseline_minutes
         surge_rate    = surge_vol    / RVOL_SURGE_MINUTES
         rvol          = surge_rate / baseline_rate
 
-        log.debug("RVOL %s: surge=%.0f/min  baseline=%.0f/min  rvol=%.2f",
-                  contract.symbol, surge_rate, baseline_rate, rvol)
-        return day_open, rvol
+        log.debug("RVOL %s: surge=%.0f/min  baseline=%.0f/min  rvol=%.2f  pre_halt=%.4f",
+                  contract.symbol, surge_rate, baseline_rate, rvol,
+                  pre_halt_close or 0)
+        return day_open, rvol, pre_halt_close
 
     except Exception as e:
         log.debug("Could not compute open/RVOL for %s: %s", contract.symbol, e)
-    return None, None
+    return None, None, None
 
 
