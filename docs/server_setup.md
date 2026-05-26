@@ -4,137 +4,105 @@
 - **Provider:** DigitalOcean
 - **IP:** 157.230.2.149
 - **User:** root
-- **Location:** /root/Live_Trader_Halts/
+- **Bot location:** /root/Live_Trader_Halts/
 
-## First-Time Setup
+## Architecture
 
-### 1. SSH into the server
-```bash
-ssh root@157.230.2.149
+```
+systemd boot
+  └── xvfb.service          (virtual display :1)
+       └── display-stack.service  (openbox + x11vnc on top of display)
+            └── ibgateway.service      (IB Gateway, auto-login via IBC)
+                 └── halt-trader.service    (trading bot)
 ```
 
-### 2. Clone the repository
+IB Gateway logs in automatically via IBC — VNC is only needed for
+occasional maintenance, not daily use.
+
+---
+
+## First-Time Full Setup
+
+### 1. Clone repo and install bot dependencies
 ```bash
 cd /root
-git clone https://github.com/YOUR_USERNAME/luld-halt-trader.git Live_Trader_Halts
+git clone https://github.com/gilbertknight-star/Trade-Halts.git Live_Trader_Halts
 cd Live_Trader_Halts
-```
-
-### 3. Create Python virtual environment
-```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install -r live_trader/requirements.txt
+pip install -r bot/requirements.txt
 ```
 
-### 4. Set up IB Gateway
-
-IB Gateway must be running for the bot to connect.
-
-**Install IB Gateway:**
+### 2. Install system packages
 ```bash
-# Download IB Gateway installer
-wget https://download2.interactivebrokers.com/installers/ibgateway/stable-standalone/ibgateway-stable-standalone-linux-x64.sh
-chmod +x ibgateway-stable-standalone-linux-x64.sh
-./ibgateway-stable-standalone-linux-x64.sh
+apt-get update
+apt-get install -y xvfb x11vnc openbox xdotool wget unzip
 ```
 
-**Set up virtual display (headless):**
+### 3. Set VNC password (one time only)
 ```bash
-apt-get install -y xvfb x11vnc openbox
-Xvfb :1 -screen 0 1024x768x24 &
-DISPLAY=:1 openbox &
+mkdir -p ~/.vnc
+x11vnc -storepasswd ~/.vnc/passwd
 ```
 
-**Start IB Gateway:**
+### 4. Install IBC (automates IB Gateway login)
 ```bash
-DISPLAY=:1 /opt/ibgateway/ibgateway &
+cd /root
+wget -q https://github.com/IbcAlpha/IBC/releases/download/3.18.0/IBCLinux-3.18.0.zip
+unzip -q IBCLinux-3.18.0.zip -d /opt/ibc
+chmod +x /opt/ibc/*.sh /opt/ibc/scripts/*.sh
 ```
 
-**Connect via VNC to log in (first time only):**
+### 5. Configure IBC with your credentials
 ```bash
-# On server — start VNC
-x11vnc -display :1 -storepasswd   # set a password
-x11vnc -display :1 -rfbauth ~/.vnc/passwd -rfbport 5900 -bg -quiet
-
-# On your local machine — connect with TigerVNC to 157.230.2.149:5900
-# Log into IB Gateway with your credentials
-# Enable API: Configure -> Settings -> API -> Enable ActiveX and Socket Clients
-#             Socket port: 4002, uncheck Read-Only API
+cp /opt/ibc/config.ini /opt/ibc/config_live.ini
+nano /opt/ibc/config_live.ini
 ```
 
-**Auto-start IB Gateway (systemd):**
-Create `/etc/systemd/system/ibgateway.service`:
+Key settings to change:
 ```ini
-[Unit]
-Description=IB Gateway
-After=network.target
-
-[Service]
-User=root
-Environment=DISPLAY=:1
-ExecStartPre=/usr/bin/Xvfb :1 -screen 0 1024x768x24
-ExecStart=/opt/ibgateway/ibgateway
-Restart=on-failure
-RestartSec=30
-
-[Install]
-WantedBy=multi-user.target
+IbLoginId=YOUR_IBKR_USERNAME
+IbPassword=YOUR_IBKR_PASSWORD
+TradingMode=paper          # change to 'live' when ready
+FIX=no
 ```
 
-### 5. Set up the bot as a systemd service
-
-Create `/etc/systemd/system/halt-trader.service`:
-```ini
-[Unit]
-Description=LULD Halt Trader
-After=network.target
-
-[Service]
-User=root
-WorkingDirectory=/root/Live_Trader_Halts/live_trader
-ExecStart=/root/Live_Trader_Halts/venv/bin/python main.py
-Restart=on-failure
-RestartSec=60
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start:
+### 6. Create all systemd services
 ```bash
-systemctl daemon-reload
-systemctl enable halt-trader
-systemctl start halt-trader
+bash /root/Live_Trader_Halts/docs/install_services.sh
 ```
 
-### 6. Monitor the bot
+---
+
+## Reconnecting After Restarting Your PC
+
+VNC and IB Gateway stay running on the server — your PC restarting
+doesn't affect them. Just open TigerVNC and connect to:
+```
+157.230.2.149:5900
+```
+Password: whatever you set in step 3.
+
+---
+
+## Daily Monitoring
+
 ```bash
-# Live logs
+# Check everything is running
+systemctl status xvfb display-stack ibgateway halt-trader
+
+# Live bot log
 journalctl -u halt-trader -f
 
-# Or tail the log file directly
-tail -f /root/Live_Trader_Halts/live_trader/trader.log
-
-# Check status
-systemctl status halt-trader
-
-# View today's trades
-cat /root/Live_Trader_Halts/live_trader/trades.csv
+# Today's trades
+cat /root/Live_Trader_Halts/bot/trades.csv
 ```
 
-## Paper vs Live Trading
+## Deploying Code Updates
 
-In `live_trader/config.py`:
-```python
-PAPER = True   # paper trading on port 4002
-PAPER = False  # live trading on port 4001
+```bash
+cd /root/Live_Trader_Halts
+git pull
+systemctl restart halt-trader
+journalctl -u halt-trader -n 20
 ```
-
-**Never set PAPER = False until you have:**
-- [ ] 3+ months of paper trading results matching backtest expectations
-- [ ] Win rate above 55% on live fills
-- [ ] Confirmed fills are within 2% of expected prices
-- [ ] IB Gateway connected to your LIVE account (not paper)
