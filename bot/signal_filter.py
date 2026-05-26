@@ -67,8 +67,12 @@ def passes_filters(ib: IB, symbol: str, halt_dt_et=None) -> tuple[bool, str, dic
             return False, f"up_move {up_move:.4f} < UP_MIN_MOVE {UP_MIN_MOVE}", {}
 
     # ── Filter 3: RVOL ────────────────────────────────────────────────────────
+    # None means baseline window was empty (halt too early in session to measure).
+    # Matches backtest: skip any event where baseline_bars was empty.
     rvol = _get_rvol(ib, contract)
-    if rvol is not None and rvol < MIN_RVOL:
+    if rvol is None:
+        return False, "rvol unavailable (insufficient baseline — halt too early in session)", {}
+    if rvol < MIN_RVOL:
         return False, f"rvol {rvol:.2f} < MIN_RVOL {MIN_RVOL}", {}
 
     metrics = {
@@ -129,11 +133,13 @@ def _get_rvol(ib: IB, contract) -> float | None:
         halt_started  = now_et - timedelta(minutes=LULD_PAUSE_MINUTES)
         surge_start   = halt_started - timedelta(minutes=RVOL_SURGE_MINUTES)
 
-        # Need at least a few minutes of baseline — skip if halted near open
+        # If surge_start is before market open, there are no baseline bars.
+        # Return None so the caller skips the trade — matches backtest behaviour
+        # of skipping when baseline_bars.empty.
         baseline_minutes = (surge_start - market_open).total_seconds() / 60
-        if baseline_minutes < 2:
-            log.debug("RVOL: not enough baseline time for %s (%.1f min)",
-                      contract.symbol, baseline_minutes)
+        if baseline_minutes <= 0:
+            log.debug("RVOL: surge window starts before open for %s — skipping",
+                      contract.symbol)
             return None
 
         with _IB_LOCK:
