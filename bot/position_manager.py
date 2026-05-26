@@ -15,6 +15,7 @@ from config import (
     MAX_POS_USD,
     MIN_POS_USD,
     MAX_POS_PER_STOCK,
+    MAX_SHARES_OVERRIDE,
     STATE_FILE,
     TRADES_CSV,
 )
@@ -77,7 +78,17 @@ class PositionManager:
         Returns whole shares to buy.
         Applies: 10% of BOD equity, $100k hard cap,
                  per-stock daily cap, minimum position size.
+        If MAX_SHARES_OVERRIDE is set, caps at that many shares regardless
+        of sizing (used for live execution testing with minimal risk).
         """
+        # Hard share cap — for live testing mode (e.g. 1 share per trade)
+        if MAX_SHARES_OVERRIDE is not None:
+            log.info(
+                "Sizing %s: MAX_SHARES_OVERRIDE=%d  price=%.4f  risk=$%.2f",
+                symbol, MAX_SHARES_OVERRIDE, price, MAX_SHARES_OVERRIDE * price,
+            )
+            return MAX_SHARES_OVERRIDE
+
         sod_eq = self.sod_equity()
 
         # 10% of BOD equity, capped at MAX_POS_USD

@@ -6,7 +6,7 @@ Key parameters match the realistic_backtest.py settings exactly.
 """
 
 # ── Mode ──────────────────────────────────────────────────────────────────────
-PAPER = True   # Set False only when ready for real money
+PAPER = False   # True = paper account (port 4002), False = live account (port 4001)
 
 # ── IBKR Gateway connection ───────────────────────────────────────────────────
 # IB Gateway: paper=4002, live=4001
@@ -20,6 +20,12 @@ POSITION_FRACTION = 0.10          # 10% of BOD equity per trade
 MAX_POS_USD       = 100_000.0     # hard cap per trade
 MIN_POS_USD       = 5.0           # skip if position would be below this
 MAX_POS_PER_STOCK = 300_000.0     # max total exposure per stock per day
+
+# ── Live execution cap ────────────────────────────────────────────────────────
+# Set to an integer to hard-cap shares per trade regardless of sizing.
+# Use during live testing to get real fills while risking minimal capital.
+# Set to None to use full sizing (POSITION_FRACTION / MAX_POS_USD logic).
+MAX_SHARES_OVERRIDE = 1           # 1 share per trade — real execution, minimal risk
 
 # ── Signal filters ────────────────────────────────────────────────────────────
 MIN_PRICE     = 1.00    # ignore sub-$1 stocks
