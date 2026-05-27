@@ -115,7 +115,8 @@ def run_trading_day(ib: IB) -> None:
 
         pm.add_position(
             symbol, shares, fill_price, trade.order.orderId,
-            metrics=metrics
+            signal_price=metrics.get("price"),   # pre_halt_close — for slippage analysis
+            metrics=metrics,
         )
 
     # Start halt monitor background thread

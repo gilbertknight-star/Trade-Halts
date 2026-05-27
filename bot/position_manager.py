@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 _CSV_FIELDS = [
     "date", "symbol",
     "entry_ts", "exit_ts",
+    "signal_px",            # pre-halt filter price (pre_halt_close from signal_filter)
     "entry_px", "exit_px",
     "shares", "invested",
     "gross_pnl", "ret_pct",
@@ -134,21 +135,23 @@ class PositionManager:
     # ── Position tracking ─────────────────────────────────────────────────────
 
     def add_position(self, symbol: str, shares: int, entry_price: float,
-                     order_id: int, halt_dt_et=None, metrics: dict | None = None) -> None:
+                     order_id: int, halt_dt_et=None, signal_price: float | None = None,
+                     metrics: dict | None = None) -> None:
         metrics = metrics or {}
         # Use a unique key for pyramid entries (symbol_N)
         key = self._unique_key(symbol)
         self._open_positions[key] = {
-            "symbol":     symbol,
-            "shares":     shares,
-            "entry_price": entry_price,
-            "invested":   shares * entry_price,
-            "order_id":   order_id,
-            "entry_time": datetime.now(timezone.utc).isoformat(),
-            "halt_time":  halt_dt_et.isoformat() if halt_dt_et else None,
-            "rvol":       metrics.get("rvol"),
-            "up_move":    metrics.get("up_move"),
-            "BOD_equity": self._sod_equity,
+            "symbol":       symbol,
+            "shares":       shares,
+            "entry_price":  entry_price,
+            "invested":     shares * entry_price,
+            "order_id":     order_id,
+            "entry_time":   datetime.now(timezone.utc).isoformat(),
+            "halt_time":    halt_dt_et.isoformat() if halt_dt_et else None,
+            "signal_price": signal_price,           # pre_halt_close from signal_filter
+            "rvol":         metrics.get("rvol"),
+            "up_move":      metrics.get("up_move"),
+            "BOD_equity":   self._sod_equity,
         }
         log.info("Position added [%s]: %d shares @ %.4f  invested=$%.0f",
                  key, shares, entry_price, shares * entry_price)
@@ -194,6 +197,7 @@ class PositionManager:
             "symbol":     pos["symbol"],
             "entry_ts":   pos.get("entry_time", ""),
             "exit_ts":    exit_time_utc.isoformat(),
+            "signal_px":  round(pos["signal_price"], 4) if pos.get("signal_price") else "",
             "entry_px":   round(entry_px, 4),
             "exit_px":    round(exit_price, 4),
             "shares":     shares,
