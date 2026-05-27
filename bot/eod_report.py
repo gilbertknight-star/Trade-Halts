@@ -254,16 +254,13 @@ def _write_report(today: str, trades: list[dict], results: list[dict]) -> None:
     W   = 62
     SEP = "─" * W
 
+    header = f"  EOD REPORT  {today}"
     lines = [
         f"╔{'═' * W}╗",
-        f"║  EOD REPORT  {today:<(W - 14)}║".format(),
+        f"║{header:<{W}}║",
         f"╚{'═' * W}╝",
         "",
     ]
-
-    # Reformat the header line properly
-    header = f"  EOD REPORT  {today}"
-    lines[1] = f"║{header:<{W}}║"
 
     if not trades:
         lines += ["  No trades today.", ""]
