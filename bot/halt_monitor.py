@@ -26,6 +26,9 @@ import requests
 
 from config import HALT_RSS_URL, HALT_POLL_SECONDS, LULD_HALT_CODES
 
+# NASDAQ RSS uses a namespace prefix on all custom fields
+NDAQ = "http://www.nasdaqtrader.com/"
+
 log = logging.getLogger(__name__)
 
 
@@ -89,9 +92,9 @@ class HaltMonitor:
             root = _parse_rss(resp.content)
             pre_fired = []
             for item in root.findall(".//item"):
-                symbol    = _text(item, "symbol") or _text(item, "title")
-                halt_code = _text(item, "reasonCode") or ""
-                resume_time = _text(item, "resumptionTime") or ""
+                symbol    = _text(item, f"{{{NDAQ}}}IssueSymbol") or _text(item, "title")
+                halt_code = _text(item, f"{{{NDAQ}}}ReasonCode") or ""
+                resume_time = _text(item, f"{{{NDAQ}}}ResumptionTradeTime") or ""
                 if not symbol:
                     continue
                 symbol = symbol.upper().strip()
@@ -123,9 +126,9 @@ class HaltMonitor:
         root = _parse_rss(resp.content)
 
         for item in root.findall(".//item"):
-            symbol      = _text(item, "symbol") or _text(item, "title")
-            halt_code   = _text(item, "reasonCode") or ""
-            resume_time = _text(item, "resumptionTime") or ""
+            symbol      = _text(item, f"{{{NDAQ}}}IssueSymbol") or _text(item, "title")
+            halt_code   = _text(item, f"{{{NDAQ}}}ReasonCode") or ""
+            resume_time = _text(item, f"{{{NDAQ}}}ResumptionTradeTime") or ""
 
             if not symbol:
                 continue
