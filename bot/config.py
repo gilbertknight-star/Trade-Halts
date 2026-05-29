@@ -16,11 +16,11 @@ IBKR_PORT      = 4002 if PAPER else 4001   # IB Gateway ports
 IBKR_CLIENT_ID = 1
 IBKR_ACCOUNT   = "U25292584"   # live account — empty string = auto (picks first)
 
-# ── Position sizing (mirrors realistic_backtest.py) ───────────────────────────
-POSITION_FRACTION = 0.10          # 10% of BOD equity per trade
-MAX_POS_USD       = 100_000.0     # hard cap per trade
+# ── Position sizing (mirrors backtest_rvol.py exactly) ───────────────────────
+POSITION_FRACTION = 0.05          # 5% of BOD equity per trade
+MAX_POS_USD       = 20_000.0      # hard cap per trade ($20k)
 MIN_POS_USD       = 5.0           # skip if position would be below this
-MAX_POS_PER_STOCK = 300_000.0     # max total exposure per stock per day
+CASH_RESERVE      = 0.05          # keep 5% of equity uninvested at all times
 
 # ── Live execution cap ────────────────────────────────────────────────────────
 # Set to an integer to hard-cap shares per trade regardless of sizing.
@@ -28,11 +28,11 @@ MAX_POS_PER_STOCK = 300_000.0     # max total exposure per stock per day
 # Set to None to use full sizing (POSITION_FRACTION / MAX_POS_USD logic).
 MAX_SHARES_OVERRIDE = 1           # 1 share per trade — real execution, minimal risk
 
-# ── Signal filters ────────────────────────────────────────────────────────────
-MIN_PRICE     = 1.00    # ignore sub-$1 stocks
-MAX_PRICE     = 500.0   # ignore stocks above $500
+# ── Signal filters (mirrors backtest_rvol.py exactly) ────────────────────────
 UP_MIN_MOVE   = 0.02    # pre-halt close must be >= session open * 1.02 (halt-up)
 MIN_RVOL      = 1.0     # surge vol rate / baseline vol rate >= 1.0
+ENTRY_CUTOFF_HOUR   = 15  # no new entries at or after 3:49 PM ET (backtest cutoff)
+ENTRY_CUTOFF_MINUTE = 49
 
 # ── EOD exit ──────────────────────────────────────────────────────────────────
 EXIT_HOUR_ET   = 15   # 3:50 PM ET — matches backtest exit time

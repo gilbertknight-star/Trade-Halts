@@ -1,8 +1,8 @@
 """
 Applies strategy filters to a halted symbol before placing an order.
 
-Filters (matching backtest):
-  1. Price range: MIN_PRICE <= price <= MAX_PRICE
+Filters (matching backtest_rvol.py exactly):
+  1. Entry cutoff: no new trades at or after 3:49 PM ET
   2. Halt-up: pre_halt_close >= session_open * (1 + UP_MIN_MOVE)
   3. RVOL: surge_vol_rate / baseline_vol_rate >= MIN_RVOL
 
@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from ib_insync import IB, Stock
 
-from config import MIN_PRICE, MAX_PRICE, UP_MIN_MOVE, MIN_RVOL
+from config import UP_MIN_MOVE, MIN_RVOL, ENTRY_CUTOFF_HOUR, ENTRY_CUTOFF_MINUTE
 
 ET = ZoneInfo("America/New_York")
 LULD_PAUSE_MINUTES = 5    # LULD pauses are always exactly 5 minutes
@@ -42,6 +42,13 @@ def passes_filters(ib: IB, symbol: str, halt_dt_et=None) -> tuple[bool, str, dic
       - gap-up filter   (matches backtest exactly)
       - position sizing (passed back in metrics as 'price')
     """
+    # ── Entry cutoff: no new trades at or after 3:49 PM ET (matches backtest) ───
+    now_et = datetime.now(ET)
+    if now_et.hour > ENTRY_CUTOFF_HOUR or (
+        now_et.hour == ENTRY_CUTOFF_HOUR and now_et.minute >= ENTRY_CUTOFF_MINUTE
+    ):
+        return False, f"past entry cutoff {ENTRY_CUTOFF_HOUR}:{ENTRY_CUTOFF_MINUTE:02d} ET", {}
+
     contract = Stock(symbol, "SMART", "USD")
 
     with _IB_LOCK:
@@ -57,22 +64,16 @@ def passes_filters(ib: IB, symbol: str, halt_dt_et=None) -> tuple[bool, str, dic
     if pre_halt_close is None or pre_halt_close <= 0:
         return False, "no valid pre-halt price from bars", {}
 
-    price = pre_halt_close   # used for sizing and price range
+    price = pre_halt_close   # used for sizing
 
-    # ── Filter 1: Price range ─────────────────────────────────────────────────
-    if price < MIN_PRICE:
-        return False, f"price {price:.4f} below MIN_PRICE {MIN_PRICE}", {}
-    if price > MAX_PRICE:
-        return False, f"price {price:.4f} above MAX_PRICE {MAX_PRICE}", {}
-
-    # ── Filter 2: Halt-up (pre_halt_close vs day_open — matches backtest) ─────
+    # ── Filter 1: Halt-up (pre_halt_close vs day_open — matches backtest) ─────
     up_move = None
     if day_open and day_open > 0:
         up_move = (price - day_open) / day_open
         if up_move < UP_MIN_MOVE:
             return False, f"up_move {up_move:.4f} < UP_MIN_MOVE {UP_MIN_MOVE}", {}
 
-    # ── Filter 3: RVOL ────────────────────────────────────────────────────────
+    # ── Filter 2: RVOL ────────────────────────────────────────────────────────
     if rvol is None:
         return False, "rvol unavailable (insufficient baseline — halt too early in session)", {}
     if rvol < MIN_RVOL:
@@ -113,8 +114,8 @@ def _get_open_and_rvol(ib: IB, contract) -> tuple[float | None, float | None, fl
         if not bars:
             return None, None, None
 
-        # day open = first bar's open price
-        day_open = float(bars[0].open) if bars else None
+        # day open = close of first bar (matches backtest: bars.iloc[0]["close"])
+        day_open = float(bars[0].close) if bars else None
 
         # ── Timing windows ────────────────────────────────────────────────────
         now_et       = datetime.now(ET)

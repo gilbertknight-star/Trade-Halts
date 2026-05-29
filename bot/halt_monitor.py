@@ -46,7 +46,7 @@ class HaltMonitor:
     """
 
     def __init__(self):
-        self._fired: set[str] = set()    # symbols already queued/traded today
+        self._fired: set[tuple] = set()  # (symbol, resume_time) pairs already queued
         self._queue: queue.Queue = queue.Queue()
         self._session = requests.Session()
         self._session.headers["User-Agent"] = "halt-trader/1.0"
@@ -73,8 +73,8 @@ class HaltMonitor:
             root = _parse_rss(resp.content)
             pre_fired = []
             for item in root.findall(".//item"):
-                symbol    = _text(item, f"{{{NDAQ}}}IssueSymbol") or _text(item, "title")
-                halt_code = _text(item, f"{{{NDAQ}}}ReasonCode") or ""
+                symbol      = _text(item, f"{{{NDAQ}}}IssueSymbol") or _text(item, "title")
+                halt_code   = _text(item, f"{{{NDAQ}}}ReasonCode") or ""
                 resume_time = _text(item, f"{{{NDAQ}}}ResumptionTradeTime") or ""
                 if not symbol:
                     continue
@@ -82,7 +82,8 @@ class HaltMonitor:
                 if halt_code not in LULD_HALT_CODES:
                     continue
                 if resume_time and resume_time.strip():
-                    self._fired.add(symbol)
+                    key = (symbol, resume_time.strip())
+                    self._fired.add(key)
                     pre_fired.append(symbol)
             if pre_fired:
                 log.info("Initial scan: skipping %d already-resumed halts: %s",
@@ -121,12 +122,16 @@ class HaltMonitor:
 
             is_resumed = bool(resume_time and resume_time.strip())
 
-            if is_resumed and symbol not in self._fired:
-                # Mark fired immediately (before worker picks it up) so
-                # subsequent polls don't re-queue the same symbol.
-                self._fired.add(symbol)
-                log.info("LULD resumption queued: %s", symbol)
-                self._queue.put(symbol)
+            if is_resumed:
+                # Key on (symbol, resume_time) so a stock that halts multiple
+                # times in one day gets a separate entry per event — matching
+                # the backtest which trades every halt event independently.
+                key = (symbol, resume_time.strip())
+                if key not in self._fired:
+                    self._fired.add(key)
+                    log.info("LULD resumption queued: %s  resume_time=%s",
+                             symbol, resume_time.strip())
+                    self._queue.put(symbol)
 
 
 def _parse_rss(content: bytes) -> ET.Element:
