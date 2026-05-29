@@ -1,26 +1,23 @@
 """
 Polls the NASDAQ trade halt RSS feed every N seconds.
-Detects LULD pause → resume transitions and emits symbols ready to trade.
+Detects LULD pause → resume transitions and pushes symbols onto a Queue.
 
-Fix (2026-05-07):
-  - Detection is now non-blocking: resolved symbols are pushed onto a Queue
-    immediately without waiting for order execution to complete.
-  - Removed the requirement that the halt phase must be observed before the
-    resumption fires. Previously, if the poll loop was frozen processing halt A
-    and halt B completed its full halt+resume cycle during that freeze, halt B
-    would be silently dropped because it was never added to _halted.
-  - A dedicated worker thread drains the queue sequentially, keeping IBKR API
-    calls single-threaded (ib_insync is not thread-safe for concurrent calls).
+Architecture:
+  - Poll thread: fetches RSS every HALT_POLL_SECONDS, pushes newly-resumed
+    symbols onto _queue. Never blocks on order execution or IB calls.
+  - Main thread: drains _queue each heartbeat tick and calls on_resumption.
+    IB API calls (qualifyContracts, reqHistoricalData, placeOrder) MUST run
+    on the thread that owns the ib_insync asyncio event loop — which is the
+    main thread. A separate worker thread cannot make these calls safely in
+    Python 3.10+ (raises "no current event loop in thread").
 """
 
 import logging
 import queue
-import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable
 
 import requests
 
@@ -44,31 +41,15 @@ class HaltEvent:
 
 class HaltMonitor:
     """
-    Polls NASDAQ halt RSS and calls on_resumption(symbol) when a LULD halt lifts.
-
-    Architecture:
-      - Poll thread: fetches RSS every HALT_POLL_SECONDS, pushes newly-resumed
-        symbols onto _queue. Never blocks on order execution.
-      - Worker thread: drains _queue one symbol at a time, calling on_resumption.
-        Sequential processing keeps IBKR API calls safe.
-
-    This means: even if 5 halts fire simultaneously, all 5 are detected and
-    queued immediately. They're then processed one-by-one by the worker, each
-    potentially 30+ seconds apart — but none are dropped.
+    Polls NASDAQ halt RSS and pushes resumed LULD symbols onto _queue.
+    The caller (main thread) is responsible for draining _queue and acting on symbols.
     """
 
-    def __init__(self, on_resumption: Callable[[str], None]):
-        self.on_resumption = on_resumption
+    def __init__(self):
         self._fired: set[str] = set()    # symbols already queued/traded today
         self._queue: queue.Queue = queue.Queue()
         self._session = requests.Session()
         self._session.headers["User-Agent"] = "halt-trader/1.0"
-
-        # Start worker thread
-        self._worker_thread = threading.Thread(
-            target=self._worker, daemon=True, name="halt-worker"
-        )
-        self._worker_thread.start()
 
     def run(self) -> None:
         """Blocking poll loop — run in a background thread."""
@@ -146,22 +127,6 @@ class HaltMonitor:
                 self._fired.add(symbol)
                 log.info("LULD resumption queued: %s", symbol)
                 self._queue.put(symbol)
-
-    def _worker(self) -> None:
-        """
-        Drain the queue sequentially. All IBKR API calls happen here, on one
-        thread, so there are no concurrency issues with ib_insync.
-        """
-        while True:
-            symbol = self._queue.get()
-            try:
-                log.info("Worker processing resumption: %s  (queue depth after: %d)",
-                         symbol, self._queue.qsize())
-                self.on_resumption(symbol)
-            except Exception as e:
-                log.error("on_resumption error for %s: %s", symbol, e, exc_info=True)
-            finally:
-                self._queue.task_done()
 
 
 def _parse_rss(content: bytes) -> ET.Element:

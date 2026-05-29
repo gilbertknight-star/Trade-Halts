@@ -14,6 +14,7 @@ Run:
 """
 
 import logging
+import queue
 import threading
 import time
 from datetime import datetime, date
@@ -81,10 +82,7 @@ def run_trading_day(ib: IB) -> None:
     eod_done = False
 
     def on_resumption(symbol: str) -> None:
-        if eod_done:
-            log.info("Ignoring %s — EOD exit already run", symbol)
-            return
-
+        # Called from the main thread — IB API calls are safe here.
         log.info("Processing resumption: %s", symbol)
 
         # Apply signal filters — returns (passes, reason, metrics)
@@ -119,15 +117,31 @@ def run_trading_day(ib: IB) -> None:
             metrics=metrics,
         )
 
-    # Start halt monitor background thread
-    monitor = HaltMonitor(on_resumption=on_resumption)
+    # Start halt monitor poll thread (RSS only — no IB calls inside)
+    monitor = HaltMonitor()
     thread  = threading.Thread(target=monitor.run, daemon=True)
     thread.start()
     log.info("Trading day started. Mode: %s  BOD_equity=$%.2f",
              "PAPER" if PAPER else "LIVE", pm.sod_equity())
 
-    # Main loop — 1-second heartbeat
+    # Main loop — drain halt queue on main thread so IB calls work correctly
     while is_market_hours():
+        # Process all queued resumptions (IB calls must run on this thread)
+        while True:
+            try:
+                symbol = monitor._queue.get_nowait()
+                log.info("Resumption dequeued: %s  (queue depth after: %d)",
+                         symbol, monitor._queue.qsize())
+                if eod_done:
+                    log.info("Ignoring %s — EOD exit already run", symbol)
+                else:
+                    try:
+                        on_resumption(symbol)
+                    except Exception as e:
+                        log.error("on_resumption error for %s: %s", symbol, e, exc_info=True)
+            except queue.Empty:
+                break
+
         if should_exit_now() and not eod_done:
             eod_done = True
             run_eod_exit(ib, pm)
