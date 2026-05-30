@@ -11,7 +11,7 @@ Returns (passes: bool, reason: str, metrics: dict)
 
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from ib_insync import IB, Stock
@@ -133,12 +133,19 @@ def _get_open_and_rvol(ib: IB, contract) -> tuple[float | None, float | None, fl
         baseline_vol   = 0.0
         pre_halt_close = None   # last bar before halt started
 
+        surge_bars_count    = 0
+        baseline_bars_count = 0
+
         for bar in bars:
             bar_dt = bar.date
             if hasattr(bar_dt, 'tzinfo') and bar_dt.tzinfo is not None:
+                # Already timezone-aware — convert to ET
                 bar_dt = bar_dt.astimezone(ET)
             else:
-                bar_dt = bar_dt.replace(tzinfo=ET)
+                # Naive datetime: IBKR returns these as UTC, not local time.
+                # Must attach UTC first, then convert — NOT replace(tzinfo=ET)
+                # which would wrongly treat a UTC time as if it were already ET.
+                bar_dt = bar_dt.replace(tzinfo=timezone.utc).astimezone(ET)
 
             # Pre-halt close: last bar that completed before the halt started
             if bar_dt < halt_started:
@@ -146,23 +153,47 @@ def _get_open_and_rvol(ib: IB, contract) -> tuple[float | None, float | None, fl
 
             if surge_start <= bar_dt < halt_started:
                 surge_vol += bar.volume
+                surge_bars_count += 1
             elif market_open <= bar_dt < surge_start:
                 baseline_vol += bar.volume
+                baseline_bars_count += 1
+
+        log.info(
+            "RVOL windows %s: market_open=%s  surge=%s→%s  halt_started=%s  "
+            "baseline_bars=%d vol=%.0f  surge_bars=%d vol=%.0f  baseline_min=%.1f",
+            contract.symbol,
+            market_open.strftime("%H:%M"),
+            surge_start.strftime("%H:%M:%S"),
+            halt_started.strftime("%H:%M:%S"),
+            halt_started.strftime("%H:%M:%S"),
+            baseline_bars_count, baseline_vol,
+            surge_bars_count, surge_vol,
+            baseline_minutes,
+        )
 
         if baseline_vol <= 0:
+            log.info("RVOL %s: no baseline volume (halt too close to open) — skip",
+                     contract.symbol)
             return day_open, None, pre_halt_close
+
+        if surge_vol <= 0:
+            log.info("RVOL %s: surge_vol=0 — no trades in the 5 min before halt "
+                     "(stock may have been halted earlier or extremely illiquid)",
+                     contract.symbol)
+            return day_open, 0.0, pre_halt_close
 
         baseline_rate = baseline_vol / baseline_minutes
         surge_rate    = surge_vol    / RVOL_SURGE_MINUTES
         rvol          = surge_rate / baseline_rate
 
-        log.debug("RVOL %s: surge=%.0f/min  baseline=%.0f/min  rvol=%.2f  pre_halt=%.4f",
-                  contract.symbol, surge_rate, baseline_rate, rvol,
-                  pre_halt_close or 0)
+        log.info("RVOL %s: surge=%.0f/min  baseline=%.0f/min  rvol=%.2f  pre_halt=%.4f",
+                 contract.symbol, surge_rate, baseline_rate, rvol,
+                 pre_halt_close or 0)
         return day_open, rvol, pre_halt_close
 
     except Exception as e:
-        log.debug("Could not compute open/RVOL for %s: %s", contract.symbol, e)
+        log.warning("Could not compute open/RVOL for %s: %s", contract.symbol, e,
+                    exc_info=True)
     return None, None, None
 
 
