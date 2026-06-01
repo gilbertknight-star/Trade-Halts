@@ -16,11 +16,11 @@ IBKR_PORT      = 4002 if PAPER else 4001   # IB Gateway ports
 IBKR_CLIENT_ID = 1
 IBKR_ACCOUNT   = "U25292584"   # live account — empty string = auto (picks first)
 
-# ── Position sizing (mirrors backtest_rvol.py exactly) ───────────────────────
-POSITION_FRACTION = 0.05          # 5% of BOD equity per trade
-MAX_POS_USD       = 20_000.0      # hard cap per trade ($20k)
+# ── Position sizing (mirrors README backtest exactly) ────────────────────────
+POSITION_FRACTION = 0.10          # 10% of BOD equity per trade
+MAX_POS_USD       = 100_000.0     # hard cap per trade ($100k)
 MIN_POS_USD       = 5.0           # skip if position would be below this
-CASH_RESERVE      = 0.05          # keep 5% of equity uninvested at all times
+CASH_RESERVE      = 0.0           # no cash reserve (matches README backtest)
 
 # ── Live execution cap ────────────────────────────────────────────────────────
 # Set to an integer to hard-cap shares per trade regardless of sizing.

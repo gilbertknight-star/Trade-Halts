@@ -14,7 +14,6 @@ from config import (
     POSITION_FRACTION,
     MAX_POS_USD,
     MIN_POS_USD,
-    CASH_RESERVE,
     MAX_SHARES_OVERRIDE,
     IBKR_ACCOUNT,
     STATE_FILE,
@@ -102,26 +101,16 @@ class PositionManager:
 
         sod_eq = self.sod_equity()
 
-        # Deployable capital = SOD equity minus cash reserve, minus already invested
-        deployable = sod_eq * (1.0 - CASH_RESERVE)
-        available  = deployable - self._open_notional()
-
-        if available < MIN_POS_USD:
-            log.info("SKIP %s — available capital $%.2f below minimum $%.2f",
-                     symbol, available, MIN_POS_USD)
-            return 0
-
-        # 5% of equity per trade, capped at $20k and remaining available capital
-        budget = min(sod_eq * POSITION_FRACTION, MAX_POS_USD, available)
+        # 10% of BOD equity per trade, capped at $100k
+        budget = min(sod_eq * POSITION_FRACTION, MAX_POS_USD)
 
         if budget < MIN_POS_USD:
             return 0
 
         shares = int(budget / price)
         log.info(
-            "Sizing %s: sod_eq=$%.0f deployable=$%.0f available=$%.0f "
-            "budget=$%.0f price=%.4f -> %d shares",
-            symbol, sod_eq, deployable, available, budget, price, shares,
+            "Sizing %s: sod_eq=$%.0f budget=$%.0f price=%.4f -> %d shares",
+            symbol, sod_eq, budget, price, shares,
         )
         return shares
 
