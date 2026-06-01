@@ -79,7 +79,15 @@ def run_trading_day(ib: IB) -> None:
     pm = PositionManager(ib)
     pm.snapshot_sod_equity()
 
-    eod_done = False
+    eod_done      = False
+    ib_disconnect = threading.Event()
+
+    def _on_ib_disconnect():
+        """Fires when IB Gateway drops the connection mid-session."""
+        ib_disconnect.set()
+        log.warning("IB disconnected — exiting trading loop to trigger reconnect")
+
+    ib.disconnectedEvent += _on_ib_disconnect
 
     def on_resumption(symbol: str) -> None:
         # Called from the main thread — IB API calls are safe here.
@@ -126,6 +134,20 @@ def run_trading_day(ib: IB) -> None:
 
     # Main loop — drain halt queue on main thread so IB calls work correctly
     while is_market_hours():
+
+        # ── Detect IB disconnect — break out so main() can reconnect ──────────
+        if ib_disconnect.is_set():
+            open_pos = pm.open_positions()
+            if open_pos:
+                log.warning(
+                    "IB dropped with %d open position(s): %s — "
+                    "will reconnect and re-run EOD exit",
+                    len(open_pos), list(open_pos.keys()),
+                )
+            else:
+                log.info("IB dropped, no open positions — reconnecting")
+            break
+
         # Process all queued resumptions (IB calls must run on this thread)
         while True:
             try:
@@ -174,7 +196,13 @@ def main() -> None:
                 pass
             log.info("Disconnected from IBKR")
 
-        time.sleep(60)
+        # If still market hours, a mid-session disconnect occurred — reconnect quickly.
+        # If market is closed, the outer loop will sleep until next open.
+        if is_market_hours():
+            log.info("Still market hours — reconnecting in 30s")
+            time.sleep(30)
+        else:
+            time.sleep(60)
 
 
 if __name__ == "__main__":
