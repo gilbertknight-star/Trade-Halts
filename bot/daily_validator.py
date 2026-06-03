@@ -521,37 +521,57 @@ def _save_and_print(today_str: str, lines: list) -> None:
 # ── Cumulative log ────────────────────────────────────────────────────────────
 
 def _append_validator_log(today_str: str, results: list) -> None:
+    # Load existing keys to avoid duplicating rows from re-runs
+    existing_keys: set[tuple] = set()
+    if VALIDATOR_LOG.exists():
+        with open(VALIDATOR_LOG, newline="") as f:
+            for row in csv.DictReader(f):
+                existing_keys.add((row.get("date"), row.get("symbol"),
+                                   row.get("resume_time")))
+
     write_header = not VALIDATOR_LOG.exists()
+    new_rows = []
+    for r in results:
+        key = (today_str, r["symbol"], r["resume_dt"].strftime("%H:%M:%S"))
+        if key in existing_keys:
+            continue   # already logged from an earlier run today
+        existing_keys.add(key)
+        live       = r.get("live_trade") or {}
+        actual_px  = float(live.get("entry_px") or 0) or None
+        slip_ps    = round(actual_px - r["sim_entry_px"], 4) \
+                     if actual_px and r.get("sim_entry_px") else None
+        slip_total = round(slip_ps * r["sim_shares"], 2) \
+                     if slip_ps and r.get("sim_shares") else None
+        new_rows.append({
+            "date":              today_str,
+            "symbol":            r["symbol"],
+            "resume_time":       r["resume_dt"].strftime("%H:%M:%S"),
+            "rvol":              r.get("rvol"),
+            "up_move":           r.get("up_move"),
+            "filter_result":     "PASS" if r["passes"] else "SKIP",
+            "filter_reason":     r.get("reason", ""),
+            "sim_entry_px":      r.get("sim_entry_px"),
+            "sim_exit_px":       r.get("sim_exit_px"),
+            "sim_pnl":           r.get("sim_pnl"),
+            "sim_shares":        r.get("sim_shares"),
+            "live_bot_action":   "TRADED" if live else ("SKIPPED" if r["passes"] else "n/a"),
+            "actual_entry_px":   live.get("entry_px"),
+            "actual_exit_px":    live.get("exit_px"),
+            "actual_pnl":        live.get("gross_pnl"),
+            "entry_slip_per_sh": slip_ps,
+            "entry_slip_total":  slip_total,
+        })
+
+    if not new_rows:
+        log.info("No new rows to append (all already logged from earlier run today)")
+        return
+
     with open(VALIDATOR_LOG, "a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=VALIDATOR_LOG_FIELDS)
         if write_header:
             w.writeheader()
-        for r in results:
-            live       = r.get("live_trade") or {}
-            actual_px  = float(live.get("entry_px") or 0) or None
-            slip_ps    = round(actual_px - r["sim_entry_px"], 4) \
-                         if actual_px and r.get("sim_entry_px") else None
-            slip_total = round(slip_ps * r["sim_shares"], 2) \
-                         if slip_ps and r.get("sim_shares") else None
-            w.writerow({
-                "date":              today_str,
-                "symbol":            r["symbol"],
-                "resume_time":       r["resume_dt"].strftime("%H:%M:%S"),
-                "rvol":              r.get("rvol"),
-                "up_move":           r.get("up_move"),
-                "filter_result":     "PASS" if r["passes"] else "SKIP",
-                "filter_reason":     r.get("reason", ""),
-                "sim_entry_px":      r.get("sim_entry_px"),
-                "sim_exit_px":       r.get("sim_exit_px"),
-                "sim_pnl":           r.get("sim_pnl"),
-                "sim_shares":        r.get("sim_shares"),
-                "live_bot_action":   "TRADED" if live else ("SKIPPED" if r["passes"] else "n/a"),
-                "actual_entry_px":   live.get("entry_px"),
-                "actual_exit_px":    live.get("exit_px"),
-                "actual_pnl":        live.get("gross_pnl"),
-                "entry_slip_per_sh": slip_ps,
-                "entry_slip_total":  slip_total,
-            })
+        w.writerows(new_rows)
+    log.info("Appended %d rows to validator_log.csv", len(new_rows))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
