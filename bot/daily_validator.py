@@ -560,20 +560,15 @@ def _get_account_equity(ib: IB) -> float:
     """Fetch live account net liquidation value."""
     from config import IBKR_ACCOUNT
     try:
-        ib.reqAccountUpdates(True, IBKR_ACCOUNT)
+        # Subscribe, wait for values to populate, then unsubscribe
+        ib.accountSummary()   # triggers account data fetch
         ib.sleep(2)
         for v in ib.accountValues():
-            if (v.tag == "NetLiquidation"
-                    and v.currency == "USD"
-                    and (not IBKR_ACCOUNT or v.account == IBKR_ACCOUNT)):
-                return float(v.value)
+            if v.tag == "NetLiquidation" and v.currency == "USD":
+                if not IBKR_ACCOUNT or v.account == IBKR_ACCOUNT:
+                    return float(v.value)
     except Exception as e:
         log.warning("Could not fetch account equity: %s", e)
-    finally:
-        try:
-            ib.reqAccountUpdates(False, IBKR_ACCOUNT)
-        except Exception:
-            pass
     return 0.0
 
 
