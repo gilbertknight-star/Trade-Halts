@@ -57,6 +57,6 @@ LOG_FILE    = "trader.log"
 # the server:  echo 'export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"' >> /root/.bashrc
 # Leave GMAIL_APP_PASSWORD as None to disable email.
 import os as _os
-GMAIL_APP_PASSWORD = _os.environ.get("GMAIL_APP_PASSWORD")  # set as env var on server
+GMAIL_APP_PASSWORD = None  # SMTP blocked by DigitalOcean — using xlsx report instead
 VALIDATOR_EMAIL_TO   = "gilbert.knight@gmail.com"
 VALIDATOR_EMAIL_FROM = "gilbert.knight@gmail.com"
