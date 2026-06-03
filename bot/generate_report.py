@@ -37,7 +37,7 @@ except ImportError:
     print("openpyxl not installed. Run: pip install openpyxl")
     sys.exit(1)
 
-REPORT_DIR   = Path("reports")
+REPORT_DIR   = Path(__file__).parent.parent / "reports"
 CSV_PATH     = REPORT_DIR / "validator_log.csv"
 OUTPUT_PATH  = REPORT_DIR / "halt_trader_report.xlsx"
 
