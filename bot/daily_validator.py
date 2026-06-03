@@ -812,14 +812,16 @@ def _matched_table(matched, BORDER, GREEN, GRAY) -> str:
 def _qualifying_table(items, BORDER, color, GRAY) -> str:
     rows = ""
     for r in items:
+        up_str    = f"{r['up_move']:.2%}"    if r.get("up_move")    is not None else "—"
+        entry_str = f"${r['sim_entry_px']:.4f}" if r.get("sim_entry_px") else "—"
+        pnl_str   = f"${r['sim_pnl']:+.2f}"  if r.get("sim_pnl")   is not None else "—"
         rows += (f'<tr style="border-bottom:1px solid {BORDER}">'
                  f'<td style="padding:6px 8px;font-weight:600">{r["symbol"]}</td>'
                  f'<td style="padding:6px 8px;color:{GRAY}">{r["resume_dt"].strftime("%H:%M:%S")}</td>'
                  f'<td style="padding:6px 8px">{r.get("rvol", "—")}</td>'
-                 f'<td style="padding:6px 8px">{f\"{r[\"up_move\"]:.2%}\" if r.get(\"up_move\") is not None else \"—\"}</td>'
-                 f'<td style="padding:6px 8px">{f\"${r[\"sim_entry_px\"]:.4f}\" if r.get(\"sim_entry_px\") else \"—\"}</td>'
-                 f'<td style="padding:6px 8px;color:{color};font-weight:600">'
-                 f'{f\"${r[\"sim_pnl\"]:+.2f}\" if r.get(\"sim_pnl\") is not None else \"—\"}</td>'
+                 f'<td style="padding:6px 8px">{up_str}</td>'
+                 f'<td style="padding:6px 8px">{entry_str}</td>'
+                 f'<td style="padding:6px 8px;color:{color};font-weight:600">{pnl_str}</td>'
                  f'</tr>')
     return f"""
     <table style="width:100%;border-collapse:collapse;font-size:13px">
