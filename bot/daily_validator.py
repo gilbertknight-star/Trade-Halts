@@ -47,7 +47,7 @@ from config import (
     UP_MIN_MOVE, MIN_RVOL,
     ENTRY_CUTOFF_HOUR, ENTRY_CUTOFF_MINUTE,
     EXIT_HOUR_ET, EXIT_MINUTE_ET,
-    POSITION_FRACTION, MAX_POS_USD, MIN_POS_USD,
+    POSITION_FRACTION, MAX_POS_USD, MIN_POS_USD, CASH_RESERVE,
     TRADES_CSV,
     GMAIL_APP_PASSWORD, VALIDATOR_EMAIL_TO, VALIDATOR_EMAIL_FROM,
 )
@@ -62,8 +62,8 @@ VALIDATOR_LOG = REPORT_DIR / "validator_log.csv"
 
 VALIDATOR_LOG_FIELDS = [
     "date", "symbol", "resume_time",
-    "rvol", "up_move",
-    "filter_result", "filter_reason",
+    "rvol", "rvol_source", "up_move",
+    "filter_result", "filter_reason", "funded",
     "sim_entry_px", "sim_exit_px", "sim_pnl", "sim_shares",
     "live_bot_action",
     "actual_entry_px", "actual_exit_px", "actual_pnl",
@@ -144,6 +144,9 @@ def main() -> None:
             ib.disconnect()
         except Exception:
             pass
+
+    # Model real account capital: which qualifying signals could be funded?
+    _apply_capital_constraints(results, equity)
 
     _write_report(today_str, halts, results, equity)
     _append_validator_log(today_str, results)
@@ -237,6 +240,66 @@ def _fetch_today_halts(today: date) -> list[dict]:
 
 # ── Filter engine (mirrors signal_filter.py exactly) ─────────────────────────
 
+def _bar_utc(bar) -> datetime:
+    """Return a bar's timestamp as a tz-aware UTC datetime."""
+    d = bar.date
+    if isinstance(d, (int, float)):
+        return datetime.fromtimestamp(d, tz=timezone.utc)
+    if getattr(d, "tzinfo", None):
+        return d.astimezone(timezone.utc)
+    return d.replace(tzinfo=timezone.utc)
+
+
+def _compute_rvol_precise(ib, contract, halt_start, surge_start, market_open, bars_1m):
+    """
+    Compute (baseline_vol, surge_vol) using 1-SECOND bars so RVOL matches the
+    1-second backtest exactly.
+
+    - Surge window [surge_start, halt_start): summed from 1-second bars (exact).
+    - Baseline [market_open, surge_start): full minutes summed from 1-minute bars
+      (a 1-min TRADES bar's volume == the sum of its seconds, so this is exact for
+      whole minutes), plus the partial straddling minute [minute_floor, surge_start)
+      filled in precisely from 1-second bars.
+
+    Returns (baseline_vol, surge_vol) or None if 1-second data is unavailable
+    (e.g. the date is older than IBKR's ~6-month 1-second history) — caller then
+    falls back to the 1-minute approximation already stored.
+    """
+    halt_utc  = halt_start.astimezone(timezone.utc)
+    surge_utc = surge_start.astimezone(timezone.utc)
+    open_utc  = market_open.astimezone(timezone.utc)
+    end_str   = halt_utc.strftime("%Y%m%d %H:%M:%S UTC")
+
+    try:
+        bars_1s = ib.reqHistoricalData(
+            contract, endDateTime=end_str, durationStr="600 S",
+            barSizeSetting="1 secs", whatToShow="TRADES",
+            useRTH=False, formatDate=2,
+        )
+    except Exception:
+        return None
+    if not bars_1s:
+        return None
+
+    surge_floor  = surge_utc.replace(second=0, microsecond=0)  # minute boundary <= surge_start
+    surge_vol    = 0.0
+    base_partial = 0.0
+    for b in bars_1s:
+        t = _bar_utc(b)
+        if surge_utc <= t < halt_utc:
+            surge_vol += b.volume
+        elif surge_floor <= t < surge_utc:
+            base_partial += b.volume
+
+    base_full = 0.0
+    for b in bars_1m:
+        t = _bar_utc(b)
+        if open_utc <= t < surge_floor:
+            base_full += b.volume
+
+    return (base_full + base_partial, surge_vol)
+
+
 def _run_filters(ib: IB, halt: dict, equity: float) -> dict:
     """
     Run the live-bot filter logic with historical halt timestamps.
@@ -259,6 +322,9 @@ def _run_filters(ib: IB, halt: dict, equity: float) -> dict:
         "sim_pnl":        None,
         "sim_shares":     None,
         "sim_pos_usd":    None,
+        "rvol_source":    None,    # "1sec" (precise) or "1min" (fallback)
+        "funded":         None,    # set by capital allocation pass
+        "fund_reason":    None,
         "live_trade":     None,
     }
 
@@ -330,11 +396,12 @@ def _run_filters(ib: IB, halt: dict, equity: float) -> dict:
         base["reason"] = "no pre-halt close price in bars"
         return base
 
-    # ── Always compute RVOL (store before any filter returns) ─────────────────
+    # ── Provisional RVOL from 1-minute bars (informational for all halts) ─────
     if baseline_min > 0 and baseline_vol > 0:
         baseline_rate = baseline_vol / baseline_min
         surge_rate    = surge_vol / RVOL_WINDOW if surge_vol > 0 else 0.0
         base["rvol"]  = round(surge_rate / baseline_rate, 2)
+        base["rvol_source"] = "1min"
 
     # ── Filter 1: gap-up ─────────────────────────────────────────────────────
     if not day_open_px or day_open_px <= 0:
@@ -354,14 +421,24 @@ def _run_filters(ib: IB, halt: dict, equity: float) -> dict:
         base["reason"] = "halt too close to open — no RVOL baseline"
         return base
 
+    # Upgrade to 1-SECOND-precise RVOL now that gap-up passed (matches backtest).
+    # Only done for gap-up survivors to limit extra IBKR requests.
+    precise = _compute_rvol_precise(ib, contract, halt_start, surge_start, market_open, bars)
+    if precise is not None:
+        baseline_vol, surge_vol = precise
+        base["rvol_source"] = "1sec"
+        if baseline_min > 0 and baseline_vol > 0:
+            surge_rate   = surge_vol / RVOL_WINDOW if surge_vol > 0 else 0.0
+            base["rvol"] = round(surge_rate / (baseline_vol / baseline_min), 2)
+
     if baseline_vol <= 0:
         base["reason"] = "zero baseline volume"
         return base
 
-    rvol         = base["rvol"] or 0.0
+    rvol = base["rvol"] or 0.0
 
     if rvol < MIN_RVOL:
-        base["reason"] = f"RVOL {rvol:.2f} < min {MIN_RVOL}"
+        base["reason"] = f"RVOL {rvol:.2f} < min {MIN_RVOL} ({base['rvol_source']})"
         return base
 
     # ── Sim position sizing ───────────────────────────────────────────────────
@@ -392,6 +469,39 @@ def _run_filters(ib: IB, halt: dict, equity: float) -> dict:
         "sim_pos_usd":  round(pos_usd, 2),
     })
     return base
+
+
+# ── Capital allocation ─────────────────────────────────────────────────────────
+
+def _apply_capital_constraints(results: list, equity: float) -> None:
+    """
+    Walk qualifying signals in resume-time order and mark which could ACTUALLY be
+    funded given the account's cash. Positions are held to the 3:50 PM EOD exit,
+    so once cash is deployed it stays deployed all day — capital only decreases
+    until close. This is what makes the ghost-P&L realistic on a small account:
+    you cannot fund 17 simultaneous $90 positions with $902.
+
+    Mutates each qualifying result:
+      funded=True  → re-sizes sim_shares/sim_pos_usd/sim_pnl to real capital
+      funded=False → fund_reason set, sim_pnl zeroed (it never traded)
+    """
+    if equity <= 0:
+        return
+    available = equity * (1.0 - CASH_RESERVE)
+    for r in sorted([x for x in results if x["passes"]],
+                    key=lambda x: x["resume_dt"]):
+        pos_usd = min(equity * POSITION_FRACTION, MAX_POS_USD, available)
+        if pos_usd < MIN_POS_USD or not r.get("sim_entry_px"):
+            r["funded"]      = False
+            r["fund_reason"] = "no capital left" if pos_usd < MIN_POS_USD else "no entry price"
+            r["sim_pnl"]     = None
+            continue
+        r["sim_shares"]  = round(pos_usd / r["sim_entry_px"], 2)
+        r["sim_pos_usd"] = round(pos_usd, 2)
+        if r.get("sim_exit_px"):
+            r["sim_pnl"] = round((r["sim_exit_px"] - r["sim_entry_px"]) * r["sim_shares"], 2)
+        r["funded"] = True
+        available -= pos_usd
 
 
 # ── Report writing ────────────────────────────────────────────────────────────
@@ -442,18 +552,25 @@ def _write_report(today_str: str, halts: list, results: list, equity: float) -> 
         else:
             rvol_str   = f"{r['rvol']:.2f}"   if r["rvol"]    is not None else "n/a"
             up_str     = f"{r['up_move']:.2%}" if r["up_move"] is not None else "n/a"
+            src        = r.get("rvol_source") or "?"
             status_parts.append(
-                f"     Filter: PASS   RVOL={rvol_str}  gap-up={up_str}  "
+                f"     Filter: PASS   RVOL={rvol_str}({src})  gap-up={up_str}  "
                 f"pre_halt=${r.get('pre_halt_close', 'n/a')}"
             )
-            status_parts.append(
-                f"     Sim:    entry=${r['sim_entry_px']:.4f}  "
-                f"exit=${r['sim_exit_px']:.4f}  "
-                f"PnL=${r['sim_pnl']:+.2f}  "
-                f"({r['sim_shares']:.0f} sh @ ${r['sim_pos_usd']:.0f})"
-                if r["sim_entry_px"] and r["sim_exit_px"] and r["sim_pnl"] is not None
-                else "     Sim:    entry data unavailable"
-            )
+            if r.get("funded") is False:
+                status_parts.append(
+                    f"     Capital: NOT FUNDED — {r.get('fund_reason','no capital')} "
+                    f"(account fully deployed earlier in the day)"
+                )
+            elif r["sim_entry_px"] and r["sim_exit_px"] and r["sim_pnl"] is not None:
+                status_parts.append(
+                    f"     Sim:    entry=${r['sim_entry_px']:.4f}  "
+                    f"exit=${r['sim_exit_px']:.4f}  "
+                    f"PnL=${r['sim_pnl']:+.2f}  "
+                    f"({r['sim_shares']:.0f} sh @ ${r['sim_pos_usd']:.0f})  [FUNDED]"
+                )
+            else:
+                status_parts.append("     Sim:    entry data unavailable")
 
             if live:
                 matched.append(r)
@@ -480,9 +597,25 @@ def _write_report(today_str: str, halts: list, results: list, equity: float) -> 
 
         lines += status_parts + [""]
 
-    # ── Summary ───────────────────────────────────────────────────────────────
-    lines += [SEP, "", f"  SIGNAL MATCH SUMMARY  ({today_str})", ""]
+    # ── Capital / ghost-P&L summary ───────────────────────────────────────────
+    funded     = [r for r in qualifying if r.get("funded")]
+    unfunded   = [r for r in qualifying if r.get("funded") is False]
+    ghost_pnl  = sum(r["sim_pnl"] for r in funded if r.get("sim_pnl") is not None)
+    sized_1sec = sum(1 for r in qualifying if r.get("rvol_source") == "1sec")
 
+    lines += [SEP, "", f"  STRATEGY (GHOST) SUMMARY  ({today_str})", ""]
+    lines.append(f"  Qualifying signals:   {len(qualifying)}   (RVOL via 1-sec: {sized_1sec})")
+    lines.append(f"  Fundable on ${equity:,.0f}: {len(funded)}   "
+                 f"(skipped, no capital: {len(unfunded)})")
+    if funded:
+        wins = sum(1 for r in funded if (r.get('sim_pnl') or 0) > 0)
+        lines.append(f"  Funded win rate:      {wins}/{len(funded)} "
+                     f"({100*wins//max(len(funded),1)}%)")
+        lines.append(f"  Ghost P&L (funded):   ${ghost_pnl:+,.2f}   "
+                     f"({ghost_pnl/equity*100:+.1f}% of account)")
+
+    # ── Live-bot match summary ────────────────────────────────────────────────
+    lines += ["", f"  LIVE-BOT MATCH  ({today_str})", ""]
     if not qualifying:
         lines.append("  No qualifying halts today.")
     elif not missed and not unexpected:
@@ -553,9 +686,11 @@ def _append_validator_log(today_str: str, results: list) -> None:
             "symbol":            r["symbol"],
             "resume_time":       r["resume_dt"].strftime("%H:%M:%S"),
             "rvol":              r.get("rvol"),
+            "rvol_source":       r.get("rvol_source"),
             "up_move":           r.get("up_move"),
             "filter_result":     "PASS" if r["passes"] else "SKIP",
             "filter_reason":     r.get("reason", ""),
+            "funded":            ("YES" if r.get("funded") else "NO") if r["passes"] else "",
             "sim_entry_px":      r.get("sim_entry_px"),
             "sim_exit_px":       r.get("sim_exit_px"),
             "sim_pnl":           r.get("sim_pnl"),
