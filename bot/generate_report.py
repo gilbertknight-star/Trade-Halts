@@ -521,7 +521,7 @@ def main():
     wb.save(OUTPUT_PATH)
     print(f"\n✓ Report saved to {OUTPUT_PATH}")
     print(f"\nTo download on Windows:")
-    print(f'  scp trade-server:/root/Live_Trader_Halts/bot/{OUTPUT_PATH} .')
+    print(f'  scp trade-server:{OUTPUT_PATH} .')
 
 
 if __name__ == "__main__":
