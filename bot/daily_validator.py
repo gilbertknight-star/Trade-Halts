@@ -545,10 +545,16 @@ def _append_validator_log(today_str: str, results: list) -> None:
 def _get_account_equity(ib: IB) -> float:
     """Fetch live account net liquidation value."""
     try:
-        summary = ib.accountSummary()
-        for item in summary:
-            if item.tag == "NetLiquidation" and item.currency == "USD":
-                return float(item.value)
+        # accountValues() is populated after connect; filter for NetLiquidation
+        for v in ib.accountValues():
+            if v.tag == "NetLiquidation" and v.currency == "USD":
+                return float(v.value)
+        # Fallback: explicit request with short wait
+        ib.reqAccountUpdates(True, "")
+        ib.sleep(2)
+        for v in ib.accountValues():
+            if v.tag == "NetLiquidation" and v.currency == "USD":
+                return float(v.value)
     except Exception as e:
         log.warning("Could not fetch account equity: %s", e)
     return 0.0
