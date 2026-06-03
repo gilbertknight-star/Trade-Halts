@@ -327,6 +327,12 @@ def _run_filters(ib: IB, halt: dict, equity: float) -> dict:
         base["reason"] = "no pre-halt close price in bars"
         return base
 
+    # ── Always compute RVOL (store before any filter returns) ─────────────────
+    if baseline_min > 0 and baseline_vol > 0:
+        baseline_rate = baseline_vol / baseline_min
+        surge_rate    = surge_vol / RVOL_WINDOW if surge_vol > 0 else 0.0
+        base["rvol"]  = round(surge_rate / baseline_rate, 2)
+
     # ── Filter 1: gap-up ─────────────────────────────────────────────────────
     if not day_open_px or day_open_px <= 0:
         base["reason"] = "no day open price"
@@ -349,10 +355,7 @@ def _run_filters(ib: IB, halt: dict, equity: float) -> dict:
         base["reason"] = "zero baseline volume"
         return base
 
-    baseline_rate = baseline_vol / baseline_min
-    surge_rate    = surge_vol / RVOL_WINDOW if surge_vol > 0 else 0.0
-    rvol          = surge_rate / baseline_rate
-    base["rvol"]  = round(rvol, 2)
+    rvol         = base["rvol"] or 0.0
 
     if rvol < MIN_RVOL:
         base["reason"] = f"RVOL {rvol:.2f} < min {MIN_RVOL}"
