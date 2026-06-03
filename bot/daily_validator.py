@@ -26,11 +26,16 @@ Output:
   reports/validator_log.csv          cumulative machine-readable log
 """
 
+import base64
 import csv
+import json
 import logging
+import os
 import sys
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -46,6 +51,7 @@ from config import (
     EXIT_HOUR_ET, EXIT_MINUTE_ET,
     POSITION_FRACTION, MAX_POS_USD, MIN_POS_USD,
     TRADES_CSV,
+    GMAIL_CREDENTIALS_FILE, VALIDATOR_EMAIL_TO, VALIDATOR_EMAIL_FROM,
 )
 
 ET_TZ        = ZoneInfo("America/New_York")
@@ -141,6 +147,16 @@ def main() -> None:
     _write_report(today_str, halts, results, equity)
     _append_validator_log(today_str, results)
     log.info("Daily validator complete → %s/%s_validator.txt", REPORT_DIR, today_str)
+
+    # ── Email report ──────────────────────────────────────────────────────────
+    if GMAIL_CREDENTIALS_FILE:
+        try:
+            _send_email(today_str, halts, results, equity)
+            log.info("Validator email sent to %s", VALIDATOR_EMAIL_TO)
+        except Exception as e:
+            log.warning("Email send failed: %s", e)
+    else:
+        log.info("Email disabled — set GMAIL_CREDENTIALS_FILE in config.py to enable")
 
 
 # ── NASDAQ halt scraper ───────────────────────────────────────────────────────
@@ -578,6 +594,352 @@ def _bar_et(bar) -> datetime:
 def _rss_text(elem: ET.Element, tag: str) -> str:
     child = elem.find(tag)
     return child.text.strip() if child is not None and child.text else ""
+
+
+# ── Gmail API email ───────────────────────────────────────────────────────────
+
+def _send_email(today_str: str, halts: list, results: list, equity: float) -> None:
+    """Build and send the daily validator email via Gmail API."""
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+
+    creds = _load_gmail_creds()
+    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+    qualifying  = [r for r in results if r["passes"]]
+    missed      = [r for r in qualifying if not r.get("live_trade")]
+    unexpected  = [r for r in results if not r["passes"] and r.get("live_trade")]
+    matched     = [r for r in qualifying if r.get("live_trade")]
+
+    subject = _email_subject(today_str, qualifying, missed, unexpected)
+    html    = _email_html(today_str, halts, results, qualifying,
+                          matched, missed, unexpected, equity)
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = VALIDATOR_EMAIL_FROM
+    msg["To"]      = VALIDATOR_EMAIL_TO
+    msg.attach(MIMEText(html, "html"))
+
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    service.users().messages().send(
+        userId="me", body={"raw": raw}
+    ).execute()
+
+
+def _load_gmail_creds() -> object:
+    """Load and refresh Gmail OAuth2 credentials from file."""
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+
+    SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
+    token_path = Path(GMAIL_CREDENTIALS_FILE).parent / "gmail_token.json"
+
+    creds = None
+    if token_path.exists():
+        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            token_path.write_text(creds.to_json())
+        else:
+            raise RuntimeError(
+                f"Gmail token missing or expired. Run gmail_auth.py once to authenticate.\n"
+                f"Token path: {token_path}"
+            )
+    return creds
+
+
+def _email_subject(today_str: str, qualifying: list,
+                   missed: list, unexpected: list) -> str:
+    if not qualifying:
+        return f"Daily Validator {today_str} — No qualifying halts today"
+    if missed or unexpected:
+        issues = []
+        if missed:      issues.append(f"{len(missed)} MISSED")
+        if unexpected:  issues.append(f"{len(unexpected)} UNEXPECTED")
+        return f"⚠ Daily Validator {today_str} — {', '.join(issues)}"
+    return f"✓ Daily Validator {today_str} — Perfect match ({len(qualifying)} halt{'s' if len(qualifying) != 1 else ''})"
+
+
+def _email_html(today_str, halts, results, qualifying,
+                matched, missed, unexpected, equity) -> str:
+    """Build HTML email body."""
+
+    # ── colour palette ────────────────────────────────────────────────────────
+    GREEN  = "#16a34a"
+    RED    = "#dc2626"
+    ORANGE = "#ea580c"
+    BLUE   = "#2563eb"
+    GRAY   = "#64748b"
+    BG     = "#f8fafc"
+    BORDER = "#e2e8f0"
+
+    def badge(text, color):
+        return (f'<span style="background:{color};color:white;padding:2px 8px;'
+                f'border-radius:4px;font-size:12px;font-weight:600">{text}</span>')
+
+    def section(title, color=BLUE):
+        return (f'<h3 style="color:{color};border-bottom:2px solid {color};'
+                f'padding-bottom:4px;margin-top:24px">{title}</h3>')
+
+    def row(label, value, value_color=None):
+        vc = f'color:{value_color};font-weight:600' if value_color else 'font-weight:600'
+        return (f'<tr><td style="padding:4px 12px 4px 0;color:{GRAY}">{label}</td>'
+                f'<td style="padding:4px 0;{vc}">{value}</td></tr>')
+
+    # ── header ────────────────────────────────────────────────────────────────
+    if not qualifying:
+        status_badge = badge("NO QUALIFYING HALTS", GRAY)
+    elif missed or unexpected:
+        status_badge = badge("⚠ DISCREPANCY", ORANGE)
+    else:
+        status_badge = badge("✓ PERFECT MATCH", GREEN)
+
+    equity_str = f"${equity:,.2f}" if equity else "unavailable"
+
+    html = f"""
+    <html><body style="font-family:system-ui,sans-serif;max-width:720px;margin:0 auto;
+                       background:{BG};padding:24px">
+    <div style="background:white;border:1px solid {BORDER};border-radius:8px;padding:24px">
+
+    <h2 style="margin:0 0 4px 0;color:#0f172a">Daily Bot Validator</h2>
+    <p style="color:{GRAY};margin:0 0 16px 0">{today_str} &nbsp;|&nbsp; {status_badge}</p>
+
+    <table style="border-collapse:collapse">
+      {row("Account equity", equity_str)}
+      {row("NASDAQ LULD halts today", str(len(halts)))}
+      {row("Qualifying halts (pass filters)", str(len(qualifying)))}
+      {row("✓ Matched (bot traded)", str(len(matched)), GREEN if matched else None)}
+      {row("✗ Missed (bot skipped)", str(len(missed)), RED if missed else GRAY)}
+      {row("⚠ Unexpected (bot traded, validator skipped)", str(len(unexpected)), ORANGE if unexpected else GRAY)}
+    </table>
+    """
+
+    # ── no qualifying halts ───────────────────────────────────────────────────
+    if not qualifying:
+        html += f"""
+        {section("All Halts Today", GRAY)}
+        <p style="color:{GRAY}">No halts passed the gap-up ≥ {UP_MIN_MOVE:.0%} and
+        RVOL ≥ {MIN_RVOL} filters today. Bot correctly idle.</p>
+        """
+        html += _halt_table(results, BORDER, GRAY, GREEN, RED)
+
+    else:
+        # ── qualifying halts detail ───────────────────────────────────────────
+        if matched:
+            html += section("✓ Matched Trades", GREEN)
+            html += _matched_table(matched, BORDER, GREEN, GRAY)
+
+        if missed:
+            html += section("✗ Missed — Validator Passed, Bot Skipped", RED)
+            html += f'<p style="color:{RED}">These halts passed all filters but the live bot did NOT trade them. Investigate bot logs for this time period.</p>'
+            html += _qualifying_table(missed, BORDER, RED, GRAY)
+
+        if unexpected:
+            html += section("⚠ Unexpected — Bot Traded, Validator Skipped", ORANGE)
+            html += f'<p style="color:{ORANGE}">The live bot traded these but they should NOT have passed filters. Check for signal logic drift.</p>'
+            html += _unexpected_table(unexpected, BORDER, ORANGE, GRAY)
+
+        # ── slippage summary ──────────────────────────────────────────────────
+        if matched:
+            html += section("Entry Slippage (Actual vs Sim Open)", BLUE)
+            html += _slippage_table(matched, BORDER, BLUE, RED, GREEN, GRAY)
+
+        # ── all halts today ───────────────────────────────────────────────────
+        html += section("All Halts Today", GRAY)
+        html += _halt_table(results, BORDER, GRAY, GREEN, RED)
+
+    html += f"""
+    <hr style="border:none;border-top:1px solid {BORDER};margin:24px 0">
+    <p style="color:{GRAY};font-size:12px;margin:0">
+      Halt Trader — Daily Validator &nbsp;|&nbsp; {today_str}<br>
+      Report saved to <code>reports/{today_str}_validator.txt</code>
+    </p>
+    </div></body></html>
+    """
+    return html
+
+
+def _halt_table(results, BORDER, GRAY, GREEN, RED) -> str:
+    rows = ""
+    for r in results:
+        sym    = r["symbol"]
+        resume = r["resume_dt"].strftime("%H:%M:%S")
+        rvol   = f"{r['rvol']:.2f}"   if r.get("rvol")    is not None else "—"
+        up     = f"{r['up_move']:.2%}" if r.get("up_move") is not None else "—"
+        color  = GREEN if r["passes"] else GRAY
+        status = "PASS" if r["passes"] else "SKIP"
+        reason = "" if r["passes"] else r.get("reason", "")
+        rows += (f'<tr style="border-bottom:1px solid {BORDER}">'
+                 f'<td style="padding:6px 8px;font-weight:600">{sym}</td>'
+                 f'<td style="padding:6px 8px;color:{GRAY}">{resume}</td>'
+                 f'<td style="padding:6px 8px">{rvol}</td>'
+                 f'<td style="padding:6px 8px">{up}</td>'
+                 f'<td style="padding:6px 8px;color:{color};font-weight:600">{status}</td>'
+                 f'<td style="padding:6px 8px;color:{GRAY};font-size:12px">{reason}</td>'
+                 f'</tr>')
+    return f"""
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead style="background:#f1f5f9">
+        <tr>
+          <th style="padding:8px;text-align:left">Symbol</th>
+          <th style="padding:8px;text-align:left">Resume</th>
+          <th style="padding:8px;text-align:left">RVOL</th>
+          <th style="padding:8px;text-align:left">Gap-up</th>
+          <th style="padding:8px;text-align:left">Filter</th>
+          <th style="padding:8px;text-align:left">Reason</th>
+        </tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>"""
+
+
+def _matched_table(matched, BORDER, GREEN, GRAY) -> str:
+    rows = ""
+    for r in matched:
+        live      = r["live_trade"]
+        sym       = r["symbol"]
+        resume    = r["resume_dt"].strftime("%H:%M:%S")
+        sim_e     = f"${r['sim_entry_px']:.4f}"   if r.get("sim_entry_px") else "—"
+        sim_x     = f"${r['sim_exit_px']:.4f}"    if r.get("sim_exit_px")  else "—"
+        sim_pnl   = f"${r['sim_pnl']:+.2f}"       if r.get("sim_pnl") is not None else "—"
+        act_e     = f"${float(live.get('entry_px') or 0):.4f}"
+        act_x     = f"${float(live.get('exit_px') or 0):.4f}"
+        act_pnl   = f"${float(live.get('gross_pnl') or 0):+.2f}"
+        pnl_color = GREEN if (r.get("sim_pnl") or 0) >= 0 else "#dc2626"
+        rows += (f'<tr style="border-bottom:1px solid {BORDER}">'
+                 f'<td style="padding:6px 8px;font-weight:600">{sym}</td>'
+                 f'<td style="padding:6px 8px;color:{GRAY}">{resume}</td>'
+                 f'<td style="padding:6px 8px">{sim_e}</td>'
+                 f'<td style="padding:6px 8px">{sim_x}</td>'
+                 f'<td style="padding:6px 8px;color:{pnl_color};font-weight:600">{sim_pnl}</td>'
+                 f'<td style="padding:6px 8px">{act_e}</td>'
+                 f'<td style="padding:6px 8px">{act_x}</td>'
+                 f'<td style="padding:6px 8px;font-weight:600">{act_pnl}</td>'
+                 f'</tr>')
+    return f"""
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead style="background:#f0fdf4">
+        <tr>
+          <th style="padding:8px;text-align:left">Symbol</th>
+          <th style="padding:8px;text-align:left">Resume</th>
+          <th colspan="3" style="padding:8px;text-align:center;border-right:2px solid #bbf7d0">Sim (no slippage)</th>
+          <th colspan="3" style="padding:8px;text-align:center">Live Bot (actual)</th>
+        </tr>
+        <tr style="font-size:11px;color:{GRAY}">
+          <th></th><th></th>
+          <th style="padding:4px 8px;text-align:left">Entry</th>
+          <th style="padding:4px 8px;text-align:left">Exit</th>
+          <th style="padding:4px 8px;text-align:left;border-right:2px solid #bbf7d0">P&L</th>
+          <th style="padding:4px 8px;text-align:left">Entry</th>
+          <th style="padding:4px 8px;text-align:left">Exit</th>
+          <th style="padding:4px 8px;text-align:left">P&L</th>
+        </tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>"""
+
+
+def _qualifying_table(items, BORDER, color, GRAY) -> str:
+    rows = ""
+    for r in items:
+        rows += (f'<tr style="border-bottom:1px solid {BORDER}">'
+                 f'<td style="padding:6px 8px;font-weight:600">{r["symbol"]}</td>'
+                 f'<td style="padding:6px 8px;color:{GRAY}">{r["resume_dt"].strftime("%H:%M:%S")}</td>'
+                 f'<td style="padding:6px 8px">{r.get("rvol", "—")}</td>'
+                 f'<td style="padding:6px 8px">{f\"{r[\"up_move\"]:.2%}\" if r.get(\"up_move\") is not None else \"—\"}</td>'
+                 f'<td style="padding:6px 8px">{f\"${r[\"sim_entry_px\"]:.4f}\" if r.get(\"sim_entry_px\") else \"—\"}</td>'
+                 f'<td style="padding:6px 8px;color:{color};font-weight:600">'
+                 f'{f\"${r[\"sim_pnl\"]:+.2f}\" if r.get(\"sim_pnl\") is not None else \"—\"}</td>'
+                 f'</tr>')
+    return f"""
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead style="background:#fef2f2">
+        <tr>
+          <th style="padding:8px;text-align:left">Symbol</th>
+          <th style="padding:8px;text-align:left">Resume</th>
+          <th style="padding:8px;text-align:left">RVOL</th>
+          <th style="padding:8px;text-align:left">Gap-up</th>
+          <th style="padding:8px;text-align:left">Sim Entry</th>
+          <th style="padding:8px;text-align:left">Sim P&L</th>
+        </tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>"""
+
+
+def _unexpected_table(items, BORDER, ORANGE, GRAY) -> str:
+    rows = ""
+    for r in items:
+        live = r.get("live_trade") or {}
+        rows += (f'<tr style="border-bottom:1px solid {BORDER}">'
+                 f'<td style="padding:6px 8px;font-weight:600">{r["symbol"]}</td>'
+                 f'<td style="padding:6px 8px;color:{GRAY}">{r["resume_dt"].strftime("%H:%M:%S")}</td>'
+                 f'<td style="padding:6px 8px;color:{ORANGE}">{r.get("reason","")}</td>'
+                 f'<td style="padding:6px 8px">{live.get("entry_px","—")}</td>'
+                 f'<td style="padding:6px 8px">{live.get("gross_pnl","—")}</td>'
+                 f'</tr>')
+    return f"""
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead style="background:#fff7ed">
+        <tr>
+          <th style="padding:8px;text-align:left">Symbol</th>
+          <th style="padding:8px;text-align:left">Resume</th>
+          <th style="padding:8px;text-align:left">Why Validator Skipped</th>
+          <th style="padding:8px;text-align:left">Actual Entry</th>
+          <th style="padding:8px;text-align:left">Actual P&L</th>
+        </tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>"""
+
+
+def _slippage_table(matched, BORDER, BLUE, RED, GREEN, GRAY) -> str:
+    rows = ""
+    total_slip = 0.0
+    for r in matched:
+        live      = r["live_trade"]
+        actual_px = float(live.get("entry_px") or 0)
+        sim_px    = r.get("sim_entry_px") or 0
+        shares    = r.get("sim_shares") or 0
+        slip_ps   = actual_px - sim_px
+        slip_tot  = round(slip_ps * shares, 2)
+        total_slip += slip_tot
+        color = RED if slip_ps > 0 else GREEN
+        rows += (f'<tr style="border-bottom:1px solid {BORDER}">'
+                 f'<td style="padding:6px 8px;font-weight:600">{r["symbol"]}</td>'
+                 f'<td style="padding:6px 8px">${sim_px:.4f}</td>'
+                 f'<td style="padding:6px 8px">${actual_px:.4f}</td>'
+                 f'<td style="padding:6px 8px;color:{color};font-weight:600">{slip_ps:+.4f}/sh</td>'
+                 f'<td style="padding:6px 8px;color:{color};font-weight:600">${slip_tot:+.2f}</td>'
+                 f'<td style="padding:6px 8px;color:{GRAY}">{shares:.0f} sh</td>'
+                 f'</tr>')
+    slip_color = RED if total_slip > 0 else GREEN
+    rows += (f'<tr style="background:#f1f5f9;font-weight:600">'
+             f'<td style="padding:6px 8px" colspan="4">Total entry slippage today</td>'
+             f'<td style="padding:6px 8px;color:{slip_color}">${total_slip:+.2f}</td>'
+             f'<td></td></tr>')
+    return f"""
+    <p style="color:{GRAY};font-size:13px">
+      Slippage = actual fill − sim open price (no slippage model).
+      Positive = you paid more than the resumption open. Negative = you got a better price.
+    </p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead style="background:#eff6ff">
+        <tr>
+          <th style="padding:8px;text-align:left">Symbol</th>
+          <th style="padding:8px;text-align:left">Sim Open</th>
+          <th style="padding:8px;text-align:left">Actual Fill</th>
+          <th style="padding:8px;text-align:left">Slip/Share</th>
+          <th style="padding:8px;text-align:left">Slip Total</th>
+          <th style="padding:8px;text-align:left">Shares</th>
+        </tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>"""
 
 
 if __name__ == "__main__":
