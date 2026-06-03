@@ -611,7 +611,10 @@ def _send_email(today_str: str, halts: list, results: list, equity: float) -> No
     msg["To"]      = VALIDATOR_EMAIL_TO
     msg.attach(MIMEText(html, "html"))
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
         server.login(VALIDATOR_EMAIL_FROM, GMAIL_APP_PASSWORD)
         server.sendmail(VALIDATOR_EMAIL_FROM, VALIDATOR_EMAIL_TO, msg.as_string())
 
