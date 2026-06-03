@@ -5,6 +5,8 @@
 - **IP:** 157.230.2.149
 - **User:** root
 - **Bot location:** /root/Live_Trader_Halts/
+- eetp pxkn hmmd sqzx
+
 
 ## Architecture
 
