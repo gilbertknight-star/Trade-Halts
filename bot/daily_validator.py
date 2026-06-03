@@ -86,8 +86,11 @@ def main() -> None:
         ],
     )
 
-    today      = date.today()
-    today_str  = today.isoformat()
+    # Use ET date — server runs UTC but markets trade in ET.
+    # After midnight UTC but before midnight ET (00:00-04:00 UTC),
+    # date.today() gives tomorrow's date in UTC but today's ET date is yesterday.
+    today     = datetime.now(ET_TZ).date()
+    today_str = today.isoformat()
     log.info("Daily validator starting for %s", today_str)
 
     # ── 1. Scrape today's halts from NASDAQ RSS ───────────────────────────────
