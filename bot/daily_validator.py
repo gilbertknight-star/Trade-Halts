@@ -26,11 +26,9 @@ Output:
   reports/validator_log.csv          cumulative machine-readable log
 """
 
-import base64
 import csv
-import json
 import logging
-import os
+import smtplib
 import sys
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
@@ -51,7 +49,7 @@ from config import (
     EXIT_HOUR_ET, EXIT_MINUTE_ET,
     POSITION_FRACTION, MAX_POS_USD, MIN_POS_USD,
     TRADES_CSV,
-    GMAIL_CREDENTIALS_FILE, VALIDATOR_EMAIL_TO, VALIDATOR_EMAIL_FROM,
+    GMAIL_APP_PASSWORD, VALIDATOR_EMAIL_TO, VALIDATOR_EMAIL_FROM,
 )
 
 ET_TZ        = ZoneInfo("America/New_York")
@@ -149,14 +147,14 @@ def main() -> None:
     log.info("Daily validator complete → %s/%s_validator.txt", REPORT_DIR, today_str)
 
     # ── Email report ──────────────────────────────────────────────────────────
-    if GMAIL_CREDENTIALS_FILE:
+    if GMAIL_APP_PASSWORD:
         try:
             _send_email(today_str, halts, results, equity)
             log.info("Validator email sent to %s", VALIDATOR_EMAIL_TO)
         except Exception as e:
             log.warning("Email send failed: %s", e)
     else:
-        log.info("Email disabled — set GMAIL_CREDENTIALS_FILE in config.py to enable")
+        log.info("Email disabled — set GMAIL_APP_PASSWORD env var on server to enable")
 
 
 # ── NASDAQ halt scraper ───────────────────────────────────────────────────────
@@ -599,18 +597,11 @@ def _rss_text(elem: ET.Element, tag: str) -> str:
 # ── Gmail API email ───────────────────────────────────────────────────────────
 
 def _send_email(today_str: str, halts: list, results: list, equity: float) -> None:
-    """Build and send the daily validator email via Gmail API."""
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request
-    from googleapiclient.discovery import build
-
-    creds = _load_gmail_creds()
-    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
-
-    qualifying  = [r for r in results if r["passes"]]
-    missed      = [r for r in qualifying if not r.get("live_trade")]
-    unexpected  = [r for r in results if not r["passes"] and r.get("live_trade")]
-    matched     = [r for r in qualifying if r.get("live_trade")]
+    """Build and send the daily validator email via Gmail SMTP."""
+    qualifying = [r for r in results if r["passes"]]
+    missed     = [r for r in qualifying if not r.get("live_trade")]
+    unexpected = [r for r in results if not r["passes"] and r.get("live_trade")]
+    matched    = [r for r in qualifying if r.get("live_trade")]
 
     subject = _email_subject(today_str, qualifying, missed, unexpected)
     html    = _email_html(today_str, halts, results, qualifying,
@@ -622,34 +613,9 @@ def _send_email(today_str: str, halts: list, results: list, equity: float) -> No
     msg["To"]      = VALIDATOR_EMAIL_TO
     msg.attach(MIMEText(html, "html"))
 
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    service.users().messages().send(
-        userId="me", body={"raw": raw}
-    ).execute()
-
-
-def _load_gmail_creds() -> object:
-    """Load and refresh Gmail OAuth2 credentials from file."""
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request
-
-    SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
-    token_path = Path(GMAIL_CREDENTIALS_FILE).parent / "gmail_token.json"
-
-    creds = None
-    if token_path.exists():
-        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            token_path.write_text(creds.to_json())
-        else:
-            raise RuntimeError(
-                f"Gmail token missing or expired. Run gmail_auth.py once to authenticate.\n"
-                f"Token path: {token_path}"
-            )
-    return creds
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(VALIDATOR_EMAIL_FROM, GMAIL_APP_PASSWORD)
+        server.sendmail(VALIDATOR_EMAIL_FROM, VALIDATOR_EMAIL_TO, msg.as_string())
 
 
 def _email_subject(today_str: str, qualifying: list,

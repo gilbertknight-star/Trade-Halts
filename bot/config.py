@@ -50,10 +50,13 @@ STATE_FILE  = "state.json"   # open positions, persists across restarts
 TRADES_CSV  = "trades.csv"   # closed trade log for comparison with backtest
 LOG_FILE    = "trader.log"
 
-# ── Daily validator email (Gmail API) ─────────────────────────────────────────
-# Set GMAIL_CREDENTIALS_FILE to the path of your Gmail API credentials JSON.
-# Download from Google Cloud Console → APIs & Services → Credentials → OAuth 2.0.
-# Leave as None to disable email (report still saves to reports/ directory).
-GMAIL_CREDENTIALS_FILE = None          # e.g. "/root/gmail_credentials.json"
-VALIDATOR_EMAIL_TO     = "gilbert.knight@gmail.com"
-VALIDATOR_EMAIL_FROM   = "gilbert.knight@gmail.com"
+# ── Daily validator email (Gmail SMTP) ───────────────────────────────────────
+# Uses a Gmail App Password (not your main password).
+# Generate at: https://myaccount.google.com/apppasswords
+# Store the app password in the GMAIL_APP_PASSWORD environment variable on
+# the server:  echo 'export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"' >> /root/.bashrc
+# Leave GMAIL_APP_PASSWORD as None to disable email.
+import os as _os
+GMAIL_APP_PASSWORD = _os.environ.get("GMAIL_APP_PASSWORD")  # set as env var on server
+VALIDATOR_EMAIL_TO   = "gilbert.knight@gmail.com"
+VALIDATOR_EMAIL_FROM = "gilbert.knight@gmail.com"
