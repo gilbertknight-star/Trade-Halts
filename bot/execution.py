@@ -32,11 +32,13 @@ def place_entry(ib: IB, symbol: str, shares: int, limit_price: float | None = No
         log.error("Could not qualify contract %s: %s", symbol, e)
         return None
 
+    from config import IBKR_ACCOUNT
     if limit_price is not None:
-        order = LimitOrder("BUY", shares, round(limit_price, 2))
+        order = LimitOrder("BUY", shares, round(limit_price, 2),
+                           account=IBKR_ACCOUNT or "")
         log.info("ENTRY LIMIT ORDER: %s BUY %d @ $%.4f", symbol, shares, limit_price)
     else:
-        order = MarketOrder("BUY", shares)
+        order = MarketOrder("BUY", shares, account=IBKR_ACCOUNT or "")
         log.info("ENTRY MARKET ORDER: %s BUY %d shares", symbol, shares)
 
     trade = ib.placeOrder(contract, order)
@@ -65,7 +67,8 @@ def place_exit(ib: IB, symbol: str, shares: int) -> Trade | None:
         log.error("Could not qualify contract %s for exit: %s", symbol, e)
         return None
 
-    order = MarketOrder("SELL", shares)
+    from config import IBKR_ACCOUNT
+    order = MarketOrder("SELL", shares, account=IBKR_ACCOUNT or "")
     trade = ib.placeOrder(contract, order)
     log.info("EXIT ORDER placed: %s SELL %d shares  orderId=%s", symbol, shares, trade.order.orderId)
     return trade
